@@ -1,0 +1,55 @@
+                    GNU GENERAL PUBLIC LICENSE
+                       Version 3, 29 June 2007
+
+ Copyright (C) 2025 alkinanireyad and RIDOS-Core Contributors
+ Project: RIDOS-Core 1.0 Nova
+ Repository: https://github.com/alkinanireyad/RIDOS-Core
+
+ Everyone is permitted to copy and distribute verbatim copies of this
+ license document, but changing it is not allowed.
+
+                            PREAMBLE
+
+ The GNU General Public License is a free, copyleft license for software
+ and other kinds of works. When we speak of free software, we are referring
+ to freedom, not price.
+
+ RIDOS-Core is free software: you can redistribute it and/or modify it
+ under the terms of the GNU General Public License as published by the
+ Free Software Foundation, either version 3 of the License, or (at your
+ option) any later version.
+
+ RIDOS-Core is distributed in the hope that it will be useful, but WITHOUT
+ ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ more details.
+
+ Full license text: https://www.gnu.org/licenses/gpl-3.0.txt
+
+                       TERMS AND CONDITIONS
+
+ 0. Definitions.
+    "The Program" refers to RIDOS-Core and all its components.
+    "You" refers to the licensee.
+
+ 1. Source Code.
+    The source code for RIDOS-Core is available at:
+    https://github.com/alkinanireyad/RIDOS-Core
+
+ 2. Third-Party Components.
+    RIDOS-Core is built upon the following open-source projects,
+    each governed by their own licenses:
+    - Linux Kernel (GPL v2): https://kernel.org
+    - Debian GNU/Linux (various): https://debian.org
+    - GNOME Desktop (GPL/LGPL): https://gnome.org
+    - Calamares Installer (GPL v3): https://calamares.io
+    - systemd (LGPL v2.1): https://systemd.io
+    - GRUB2 (GPL v3): https://www.gnu.org/software/grub/
+    - Rust (MIT/Apache 2.0): https://rust-lang.org
+
+ 3. No Warranty.
+    RIDOS-Core is provided "as is" without warranty of any kind.
+    The authors are not liable for any damages arising from its use.
+
+ For the complete GPL v3 license text, see:
+ https://www.gnu.org/licenses/gpl-3.0.txt
