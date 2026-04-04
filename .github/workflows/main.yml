@@ -60,9 +60,15 @@ jobs:
           sudo chroot chroot apt-get install -y \
             live-boot live-boot-initramfs-tools \
             linux-image-amd64 initramfs-tools \
-            grub-pc grub-pc-bin grub2-common grub-common \
-            grub-efi-amd64 grub-efi-amd64-bin efibootmgr os-prober \
+            grub-pc-bin grub2-common grub-common \
+            grub-efi-amd64-bin efibootmgr os-prober \
             bash-completion tzdata locales cryptsetup
+
+          sudo chroot chroot apt-get install -y \
+            grub-pc || true
+
+          sudo chroot chroot apt-get install -y \
+            grub-efi-amd64 || true
 
           # Firmware + hardware
           sudo chroot chroot apt-get install -y \
