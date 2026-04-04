@@ -99,6 +99,7 @@ jobs:
 
           # ── Core boot + live system ───────────────────────────────────────
           sudo chroot chroot apt-get install -y \
+            policykit-1-gnome gnome-session-bin || true
             live-boot live-boot-initramfs-tools \
             linux-image-amd64 initramfs-tools \
             grub-pc-bin grub2-common grub-common \
@@ -359,9 +360,8 @@ jobs:
           # ── Desktop shortcuts (using printf — heredocs break YAML) ───────────
 
           # Install RIDOS-Core (Calamares)
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nComment=Install RIDOS-Core 1.0 Nova to your hard drive\nExec=sudo /usr/bin/calamares\nIcon=calamares\nTerminal=false\nCategories=System;\n' \
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nExec=gnome-terminal -- bash -c "sudo /usr/bin/calamares; bash"\nIcon=calamares\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/install-ridos-core.desktop > /dev/null
-
           # Brave Browser
           printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Brave Browser\nComment=Fast, private browser\nExec=brave-browser %%U\nIcon=brave-browser\nTerminal=false\nCategories=Network;WebBrowser;\n' \
             | sudo tee chroot/home/ridos/Desktop/brave-browser.desktop > /dev/null
