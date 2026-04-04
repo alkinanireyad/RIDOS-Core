@@ -140,7 +140,7 @@ write('/etc/calamares/modules/fstab.conf', '''---
 mountOptions:
   default: defaults
   btrfs:   defaults,compress=zstd
-  efi:     umask=0077
+  efi:     "umask=0077"
 efiMountPoint: "/boot/efi"
 ''')
 write('/etc/calamares/modules/hwclock.conf',    '---\nsetHardwareClock: true\n')
