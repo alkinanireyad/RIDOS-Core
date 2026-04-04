@@ -10,10 +10,11 @@ on:
 # RIDOS-Core 1.0 Nova
 # Repository: alkinanireyad/RIDOS-Core
 # Base      : Debian 12 Bookworm + Linux 6.12 LTS
-# Desktop   : GNOME (Xorg default for compatibility, Wayland available)
+# Desktop   : GNOME (Xorg default, Wayland available)
 # Browser   : Brave (primary) + Firefox-ESR (fallback)
 # Tools     : Full Pro IT / Security / DevOps / Recovery toolkit
 # Installer : Calamares with LUKS encryption option
+# Help      : ridos-help system for beginners and pro users
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -25,7 +26,6 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # ── Host build tools ──────────────────────────────────────────────────
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -36,7 +36,6 @@ jobs:
             imagemagick librsvg2-bin python3-pip
           echo "Build dependencies ready"
 
-      # ── Bootstrap Debian bookworm base ────────────────────────────────────
       - name: Bootstrap Debian bookworm
         run: |
           curl -fsSL https://ftp-master.debian.org/keys/release-12.asc \
@@ -57,30 +56,25 @@ jobs:
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
 
-          # Debian repos
           printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\ndeb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\ndeb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
             | sudo tee chroot/etc/apt/sources.list > /dev/null
 
-          # Brave Browser official apt repo
-          sudo chroot chroot bash -c "
-            apt-get install -y curl gnupg2 apt-transport-https 2>/dev/null || true
-            curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
-              https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg && \
-            echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] \
-              https://brave-browser-apt-release.s3.brave.com/ stable main' \
-              > /etc/apt/sources.list.d/brave-browser.list
-          " || echo "WARNING: Brave repo setup failed — will use Firefox only"
-
-          # VS Code official apt repo — key must be dearmored correctly
+          # Brave Browser repo
           sudo chroot chroot bash -c "
             apt-get install -y curl gnupg2 apt-transport-https ca-certificates 2>/dev/null || true
+            curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+              https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg && \
+            echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+              > /etc/apt/sources.list.d/brave-browser.list
+          " || echo "WARNING: Brave repo failed — Firefox only"
+
+          # VS Code repo — key must be dearmored with gpg --dearmor
+          sudo chroot chroot bash -c "
             curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
               | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
-            echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] \
-              https://packages.microsoft.com/repos/code stable main' \
-              > /etc/apt/sources.list.d/vscode.list && \
-            echo 'VS Code repo OK'
-          " || echo "WARNING: VS Code repo setup failed — skipping VS Code"
+            echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' \
+              > /etc/apt/sources.list.d/vscode.list
+          " || echo "WARNING: VS Code repo failed — skipping"
 
           sudo chroot chroot apt-get update -qq || true
 
@@ -97,9 +91,8 @@ jobs:
           sudo mount --bind /sys  chroot/sys
           sudo mount --bind /run  chroot/run
 
-          # ── Core boot + live system ───────────────────────────────────────
+          # Core boot + live
           sudo chroot chroot apt-get install -y \
-            policykit-1-gnome gnome-session-bin || true
             live-boot live-boot-initramfs-tools \
             linux-image-amd64 initramfs-tools \
             grub-pc-bin grub2-common grub-common \
@@ -107,11 +100,10 @@ jobs:
             bash-completion tzdata locales cryptsetup \
             policykit-1-gnome apt-transport-https ca-certificates
 
-          # Install grub meta-packages separately to avoid conflict
           sudo chroot chroot apt-get install -y grub-pc        || true
           sudo chroot chroot apt-get install -y grub-efi-amd64 || true
 
-          # ── Firmware + hardware ───────────────────────────────────────────
+          # Firmware + hardware
           sudo chroot chroot apt-get install -y \
             firmware-linux firmware-linux-free firmware-linux-nonfree \
             firmware-iwlwifi firmware-atheros firmware-realtek \
@@ -120,9 +112,7 @@ jobs:
             fwupd fwupd-signed \
             --no-install-recommends || true
 
-          # ── GNOME desktop ─────────────────────────────────────────────────
-          # Xorg is default for maximum compatibility (VirtualBox, older HW)
-          # Wayland session is available at GDM login screen
+          # GNOME desktop (Xorg default, Wayland available)
           sudo chroot chroot apt-get install -y \
             gnome-core gnome-shell gnome-session \
             gnome-terminal gnome-text-editor \
@@ -134,7 +124,7 @@ jobs:
             network-manager-gnome \
             gvfs gvfs-backends
 
-          # ── Graphics drivers ──────────────────────────────────────────────
+          # Graphics drivers
           sudo chroot chroot apt-get install -y \
             xserver-xorg-video-all xserver-xorg-input-all \
             xserver-xorg-video-intel xserver-xorg-video-amdgpu \
@@ -144,28 +134,28 @@ jobs:
             va-driver-all \
             --no-install-recommends || true
 
-          # ── Audio ─────────────────────────────────────────────────────────
+          # Audio
           sudo chroot chroot apt-get install -y \
             pulseaudio pulseaudio-utils alsa-utils
 
-          # ── VM guest tools ────────────────────────────────────────────────
+          # VM guest tools
           sudo chroot chroot apt-get install -y \
             virtualbox-guest-utils virtualbox-guest-x11 \
             spice-vdagent \
             open-vm-tools open-vm-tools-desktop || true
 
-          # ── Brave Browser ─────────────────────────────────────────────────
+          # Brave Browser
           sudo chroot chroot apt-get install -y brave-browser \
             && echo "Brave OK" || echo "WARNING: Brave failed — Firefox only"
 
-          # ── Firefox ESR fallback ──────────────────────────────────────────
+          # Firefox ESR fallback
           sudo chroot chroot apt-get install -y firefox-esr
 
-          # ── VS Code ───────────────────────────────────────────────────────
+          # VS Code
           sudo chroot chroot apt-get install -y code \
-            && echo "VS Code OK" || echo "WARNING: VS Code failed — skipping"
+            && echo "VS Code OK" || echo "WARNING: VS Code failed"
 
-          # ── Calamares installer ───────────────────────────────────────────
+          # Calamares installer
           sudo chroot chroot apt-get install -y \
             calamares calamares-data \
             && echo "Calamares OK" || echo "Calamares FAILED"
@@ -173,7 +163,7 @@ jobs:
             qml-module-qtquick2 qml-module-qtquick-controls2 \
             qml-module-qtquick-layouts python3-pyqt5 || true
 
-          # ── Python stack ──────────────────────────────────────────────────
+          # Python stack
           sudo chroot chroot apt-get install -y \
             python3 python3-pip python3-venv python3-tk \
             python3-gi python3-gi-cairo \
@@ -181,76 +171,57 @@ jobs:
             python3-psutil python3-requests \
             python3-flask python3-flask-socketio
 
-          # ── Development tools ─────────────────────────────────────────────
+          # Development tools
           sudo chroot chroot apt-get install -y \
             build-essential gcc g++ make cmake \
-            git git-gui \
-            vim nano \
-            curl wget \
-            zip unzip p7zip-full \
+            git git-gui vim nano \
+            curl wget zip unzip p7zip-full \
             jq shellcheck
 
-          # ── Pro IT: Network & Analysis ────────────────────────────────────
+          # Pro IT: Network & Analysis
           sudo chroot chroot apt-get install -y \
-            nmap \
-            wireshark wireshark-common tshark \
-            tcpdump \
-            netcat-openbsd ncat \
-            traceroute \
-            mtr-tiny \
-            iperf3 \
-            net-tools \
-            dnsutils \
-            whois \
-            ipcalc \
-            arping \
-            ethtool \
+            nmap wireshark wireshark-common tshark \
+            tcpdump netcat-openbsd ncat \
+            traceroute mtr-tiny iperf3 \
+            net-tools dnsutils whois \
+            ipcalc arping ethtool \
             openssh-client openssh-server
 
-          # ── Pro IT: Security & Auditing ───────────────────────────────────
+          # Pro IT: Security & Auditing
           sudo chroot chroot apt-get install -y \
-            aircrack-ng \
-            john \
-            hydra \
-            hashcat \
-            nikto \
-            sqlmap \
-            dirb \
-            steghide \
-            binwalk \
-            foremost \
-            firejail \
-            wireguard wireguard-tools \
+            aircrack-ng john hydra hashcat \
+            nikto sqlmap dirb \
+            steghide binwalk foremost \
+            firejail wireguard wireguard-tools \
             gnupg2 openssl
 
-          # ── Pro IT: System Monitoring ─────────────────────────────────────
+          # Pro IT: System Monitoring
           sudo chroot chroot apt-get install -y \
             htop btop iotop iftop nethogs \
             ncdu lshw dmidecode \
             smartmontools hdparm \
             sysstat lsof strace
 
-          # ── Pro IT: Modern CLI tools ──────────────────────────────────────
+          # Pro IT: Modern CLI tools
           sudo chroot chroot apt-get install -y \
             bat ripgrep fd-find \
             neofetch tree tmux screen fzf
 
-          # ── Pro IT: Disk & Recovery ───────────────────────────────────────
+          # Pro IT: Disk & Recovery
           sudo chroot chroot apt-get install -y \
-            gparted parted testdisk \
-            gddrescue rsync \
-            dosfstools ntfs-3g exfat-fuse \
+            gparted parted testdisk gddrescue \
+            rsync dosfstools ntfs-3g exfat-fuse \
             squashfs-tools
 
-          # ── Pro IT: Containers & DevOps ───────────────────────────────────
+          # Pro IT: Containers & DevOps
           sudo chroot chroot apt-get install -y \
             docker.io docker-compose ansible || true
 
-          # ── Pro IT: Web & API tools ───────────────────────────────────────
+          # Pro IT: Web & API tools
           sudo chroot chroot apt-get install -y \
             httpie lynx proxychains4
 
-          # ── System utilities ──────────────────────────────────────────────
+          # System utilities
           sudo chroot chroot apt-get install -y \
             flatpak timeshift cockpit \
             zram-tools tlp tlp-rdw \
@@ -262,7 +233,7 @@ jobs:
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
-          echo "All packages installed successfully"
+          echo "All packages installed"
 
       # ── Create ridos user INSIDE chroot ───────────────────────────────────
       - name: Create ridos user
@@ -276,7 +247,6 @@ jobs:
             --groups sudo,audio,video,netdev,plugdev \
             ridos 2>/dev/null || true
 
-          # username=ridos  password=ridos
           echo "ridos:ridos" | sudo chroot chroot chpasswd
           echo "root:ridos"  | sudo chroot chroot chpasswd
 
@@ -284,11 +254,9 @@ jobs:
             | sudo tee chroot/etc/sudoers.d/ridos > /dev/null
           sudo chmod 440 chroot/etc/sudoers.d/ridos
 
-          # Add to wireshark and docker groups
           sudo chroot chroot usermod -aG wireshark ridos 2>/dev/null || true
           sudo chroot chroot usermod -aG docker    ridos 2>/dev/null || true
 
-          # Verify
           echo "--- Verifying user ---"
           sudo chroot chroot id ridos
           sudo chroot chroot grep ridos /etc/passwd
@@ -296,7 +264,7 @@ jobs:
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
-          echo "User ridos created: username=ridos password=ridos"
+          echo "User ridos: username=ridos password=ridos"
 
       # ── Configure system (INSIDE chroot) ──────────────────────────────────
       - name: Configure system
@@ -309,7 +277,6 @@ jobs:
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
-          echo "System configured"
 
       # ── Configure Calamares (INSIDE chroot) ───────────────────────────────
       - name: Configure Calamares
@@ -322,7 +289,6 @@ jobs:
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
-          echo "Calamares configured"
 
       # ── Apply branding (INSIDE chroot) ────────────────────────────────────
       - name: Apply branding
@@ -335,7 +301,6 @@ jobs:
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
-          echo "Branding applied"
 
       # ── Install RIDOS-Core files + Desktop shortcuts ───────────────────────
       - name: Install RIDOS-Core files
@@ -353,37 +318,50 @@ jobs:
           sudo chmod +x chroot/opt/ridos-core/bin/*.py 2>/dev/null || true
           sudo chmod +x chroot/opt/ridos-core/bin/*.sh 2>/dev/null || true
 
+          # Help system
+          sudo cp ridos-core/ridos-help.py chroot/opt/ridos-core/bin/ 2>/dev/null || true
+          sudo chmod +x chroot/opt/ridos-core/bin/ridos-help.py 2>/dev/null || true
+
           # Legal files
           sudo cp legal/LICENSE.txt legal/COPYRIGHT legal/CONTRIBUTORS.md \
                chroot/usr/share/ridos-core/ 2>/dev/null || true
 
-          # ── Desktop shortcuts (using printf — heredocs break YAML) ───────────
+          # ridos-help global command
+          printf '#!/bin/bash\npython3 /opt/ridos-core/bin/ridos-help.py "$@"\n' \
+            | sudo tee chroot/usr/local/bin/ridos-help > /dev/null
+          sudo chmod +x chroot/usr/local/bin/ridos-help
 
-          # Install RIDOS-Core (Calamares)
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nExec=gnome-terminal -- bash -c "sudo /usr/bin/calamares; bash"\nIcon=calamares\nTerminal=false\nCategories=System;\n' \
+          # ── Desktop shortcuts (printf — NO heredocs to avoid YAML errors) ──
+
+          # 1. Install RIDOS-Core — uses gnome-terminal so always visible in GNOME
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nComment=Install RIDOS-Core 1.0 Nova to your hard drive\nExec=gnome-terminal -- bash -c "sudo /usr/bin/calamares; exec bash"\nIcon=calamares\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/install-ridos-core.desktop > /dev/null
-          # Brave Browser
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Brave Browser\nComment=Fast, private browser\nExec=brave-browser %%U\nIcon=brave-browser\nTerminal=false\nCategories=Network;WebBrowser;\n' \
+
+          # 2. Brave Browser
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Brave Browser\nComment=Fast private browser\nExec=brave-browser %%U\nIcon=brave-browser\nTerminal=false\nCategories=Network;WebBrowser;\n' \
             | sudo tee chroot/home/ridos/Desktop/brave-browser.desktop > /dev/null
 
-          # RIDOS IT Tools terminal
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=RIDOS-Core IT Tools\nComment=Pro IT toolkit\nExec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/ridos_shell.py; bash"\nIcon=utilities-terminal\nTerminal=false\nCategories=System;\n' \
+          # 3. RIDOS IT Tools
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=RIDOS-Core IT Tools\nComment=Pro IT toolkit\nExec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/ridos_shell.py; exec bash"\nIcon=utilities-terminal\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/ridos-tools.desktop > /dev/null
 
-          # Optional Tools welcome app
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Optional Tools\nComment=Install optional tools for RIDOS-Core\nExec=python3 /opt/ridos-core/bin/welcome-app.py\nIcon=system-software-install\nTerminal=false\nCategories=System;\n' \
+          # 4. Optional Tools
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Optional Tools\nComment=Install optional tools\nExec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/welcome-app.py; exec bash"\nIcon=system-software-install\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/ridos-welcome.desktop > /dev/null
 
-          sudo chown -R 1000:1000 chroot/home/ridos/Desktop 2>/dev/null || true
-          sudo chmod +x chroot/home/ridos/Desktop/*.desktop  2>/dev/null || true
-          sudo chmod -R 755 chroot/opt/ridos-core/bin        2>/dev/null || true
-          sudo chmod -R 777 chroot/opt/ridos-core/logs       2>/dev/null || true
-          sudo chown -R 1000:1000 chroot/home/ridos           2>/dev/null || true
+          # 5. RIDOS Help
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=RIDOS-Core Help\nComment=Help for beginners and pro users\nExec=gnome-terminal -- bash -c "ridos-help; exec bash"\nIcon=help-browser\nTerminal=false\nCategories=System;\n' \
+            | sudo tee chroot/home/ridos/Desktop/ridos-help.desktop > /dev/null
+
+          sudo chown -R 1000:1000 chroot/home/ridos          2>/dev/null || true
+          sudo chmod +x chroot/home/ridos/Desktop/*.desktop   2>/dev/null || true
+          sudo chmod -R 755 chroot/opt/ridos-core/bin         2>/dev/null || true
+          sudo chmod -R 777 chroot/opt/ridos-core/logs        2>/dev/null || true
 
           sudo python3 build-system/scripts/install-ridos-files.py 2>/dev/null || true
-          echo "RIDOS-Core files and desktop shortcuts installed"
+          echo "RIDOS-Core files installed"
 
-      # ── Build squashfs with zstd (faster boot than xz) ────────────────────
+      # ── Build squashfs ────────────────────────────────────────────────────
       - name: Build squashfs filesystem
         run: |
           sudo mksquashfs chroot filesystem.squashfs \
@@ -398,7 +376,7 @@ jobs:
           KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
           INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
           if [ -z "$KERNEL" ] || [ -z "$INITRD" ]; then
-            echo "ERROR: kernel or initrd not found in chroot/boot/"
+            echo "ERROR: kernel or initrd not found"
             ls chroot/boot/ || true
             exit 1
           fi
@@ -453,13 +431,10 @@ jobs:
               "/=iso"
 
           ls -lh ridos-core-1.0-nova-x86_64.iso
-          md5sum    ridos-core-1.0-nova-x86_64.iso \
-            > ridos-core-1.0-nova-x86_64.iso.md5
-          sha256sum ridos-core-1.0-nova-x86_64.iso \
-            > ridos-core-1.0-nova-x86_64.iso.sha256
+          md5sum    ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.md5
+          sha256sum ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.sha256
           echo "ISO ready!"
 
-      # ── Upload artifact ───────────────────────────────────────────────────
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
@@ -470,7 +445,6 @@ jobs:
             ridos-core-1.0-nova-x86_64.iso.sha256
           retention-days: 30
 
-      # ── GitHub Release on version tag ─────────────────────────────────────
       - name: Create GitHub Release on tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -479,6 +453,6 @@ jobs:
             ridos-core-1.0-nova-x86_64.iso.md5 \
             ridos-core-1.0-nova-x86_64.iso.sha256 \
             --title "RIDOS-Core ${{ github.ref_name }} Nova" \
-            --notes "RIDOS-Core 1.0 Nova — Rust-Ready Linux with Brave Browser + Pro IT Tools. Login: ridos/ridos. GPL v3. Repo: alkinanireyad/RIDOS-Core"
+            --notes "RIDOS-Core 1.0 Nova — Rust-Ready Linux. Login: ridos/ridos. GPL v3."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
