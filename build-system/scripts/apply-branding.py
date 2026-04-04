@@ -4361,17 +4361,17 @@ write("/etc/issue.net", "RIDOS-Core 1.0 Nova\n")
 
 print("[2] Official logo and wallpaper ...")
 for d in ["/usr/share/ridos-core", "/usr/share/backgrounds/ridos-core",
-          "/usr/share/pixmaps", "/etc/calamares/branding/ridos-core"]:
+          "/usr/share/pixmaps", "/usr/share/calamares/branding/ridos-core"]:
     os.makedirs(d, exist_ok=True)
 
 write_bin("/usr/share/ridos-core/ridos-core-logo.png",          LOGO_B64)
 write_bin("/usr/share/pixmaps/ridos-core-logo.png",             LOGO_B64)
-write_bin("/etc/calamares/branding/ridos-core/ridos-core-logo.png",    LOGO_B64)
-write_bin("/etc/calamares/branding/ridos-core/ridos-core-welcome.png", WALL_B64)
+write_bin("/usr/share/calamares/branding/ridos-core/ridos-core-logo.png",    LOGO_B64)
+write_bin("/usr/share/calamares/branding/ridos-core/ridos-core-welcome.png", WALL_B64)
 write_bin("/usr/share/backgrounds/ridos-core/ridos-core-wallpaper.png", WALL_B64)
 
 print("[3] Calamares branding.desc ...")
-write("/etc/calamares/branding/ridos-core/branding.desc",
+write("/usr/share/calamares/branding/ridos-core/branding.desc",
     "---\n"
     "componentName: ridos-core\n"
     "welcomeStyleCalamares: true\n"
@@ -4399,7 +4399,7 @@ write("/etc/calamares/branding/ridos-core/branding.desc",
     "  sidebarTextHighlight: \"#1F6FEB\"\n"
 )
 
-write("/etc/calamares/branding/ridos-core/show.qml",
+write("/usr/share/calamares/branding/ridos-core/show.qml",
     "import QtQuick 2.0\n"
     "import calamares.slideshow 1.0\n"
     "Presentation {\n"
