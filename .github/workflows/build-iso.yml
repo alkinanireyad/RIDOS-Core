@@ -71,16 +71,18 @@ jobs:
               > /etc/apt/sources.list.d/brave-browser.list
           " || echo "WARNING: Brave repo setup failed — will use Firefox only"
 
-          # VS Code official apt repo
+          # VS Code official apt repo — key must be dearmored correctly
           sudo chroot chroot bash -c "
-            curl -fsSLo /usr/share/keyrings/microsoft.gpg \
-              https://packages.microsoft.com/keys/microsoft.asc && \
+            apt-get install -y curl gnupg2 apt-transport-https ca-certificates 2>/dev/null || true
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+              | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
             echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] \
               https://packages.microsoft.com/repos/code stable main' \
-              > /etc/apt/sources.list.d/vscode.list
-          " || echo "WARNING: VS Code repo setup failed — will skip"
+              > /etc/apt/sources.list.d/vscode.list && \
+            echo 'VS Code repo OK'
+          " || echo "WARNING: VS Code repo setup failed — skipping VS Code"
 
-          sudo chroot chroot apt-get update -qq
+          sudo chroot chroot apt-get update -qq || true
 
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
