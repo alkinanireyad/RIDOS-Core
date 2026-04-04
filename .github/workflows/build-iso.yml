@@ -354,59 +354,23 @@ jobs:
           sudo cp legal/LICENSE.txt legal/COPYRIGHT legal/CONTRIBUTORS.md \
                chroot/usr/share/ridos-core/ 2>/dev/null || true
 
-          # ── Desktop shortcuts ─────────────────────────────────────────────
+          # ── Desktop shortcuts (using printf — heredocs break YAML) ───────────
 
-          # Install RIDOS-Core (Calamares) — visible on desktop
-          sudo tee chroot/home/ridos/Desktop/install-ridos-core.desktop > /dev/null <<'DESK'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Install RIDOS-Core
-Comment=Install RIDOS-Core 1.0 Nova to your hard drive
-Exec=sudo /usr/bin/calamares
-Icon=calamares
-Terminal=true
-Categories=System;
-DESK
+          # Install RIDOS-Core (Calamares)
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nComment=Install RIDOS-Core 1.0 Nova to your hard drive\nExec=sudo /usr/bin/calamares\nIcon=calamares\nTerminal=true\nCategories=System;\n' \
+            | sudo tee chroot/home/ridos/Desktop/install-ridos-core.desktop > /dev/null
 
-          # Brave Browser shortcut
-          sudo tee chroot/home/ridos/Desktop/brave-browser.desktop > /dev/null <<'DESK'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Brave Browser
-Comment=Fast, private browser
-Exec=brave-browser %U
-Icon=brave-browser
-Terminal=false
-Categories=Network;WebBrowser;
-DESK
+          # Brave Browser
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Brave Browser\nComment=Fast, private browser\nExec=brave-browser %%U\nIcon=brave-browser\nTerminal=false\nCategories=Network;WebBrowser;\n' \
+            | sudo tee chroot/home/ridos/Desktop/brave-browser.desktop > /dev/null
 
           # RIDOS IT Tools terminal
-          sudo tee chroot/home/ridos/Desktop/ridos-tools.desktop > /dev/null <<'DESK'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=RIDOS-Core IT Tools
-Comment=Pro IT toolkit — nmap, wireshark, john, hydra and more
-Exec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/ridos_shell.py; bash"
-Icon=utilities-terminal
-Terminal=false
-Categories=System;
-DESK
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=RIDOS-Core IT Tools\nComment=Pro IT toolkit\nExec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/ridos_shell.py; bash"\nIcon=utilities-terminal\nTerminal=false\nCategories=System;\n' \
+            | sudo tee chroot/home/ridos/Desktop/ridos-tools.desktop > /dev/null
 
-          # Welcome app / optional tools installer
-          sudo tee chroot/home/ridos/Desktop/ridos-welcome.desktop > /dev/null <<'DESK'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Optional Tools
-Comment=Install optional tools for RIDOS-Core
-Exec=python3 /opt/ridos-core/bin/welcome-app.py
-Icon=system-software-install
-Terminal=false
-Categories=System;
-DESK
+          # Optional Tools welcome app
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Optional Tools\nComment=Install optional tools for RIDOS-Core\nExec=python3 /opt/ridos-core/bin/welcome-app.py\nIcon=system-software-install\nTerminal=false\nCategories=System;\n' \
+            | sudo tee chroot/home/ridos/Desktop/ridos-welcome.desktop > /dev/null
 
           sudo chown -R 1000:1000 chroot/home/ridos/Desktop 2>/dev/null || true
           sudo chmod +x chroot/home/ridos/Desktop/*.desktop  2>/dev/null || true
