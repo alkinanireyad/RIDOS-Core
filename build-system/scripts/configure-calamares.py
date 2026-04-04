@@ -54,7 +54,7 @@ dont-chroot: false
 ''')
 
 print("[2/11] partition.conf (with LUKS encryption support) ...")
-write('/etc/calamares/modules/partition.conf', '''---
+/etc/calamares/modules/partition.conf', '''---
 efiSystemPartition:       "/boot/efi"
 efiSystemPartitionSize:   "512M"
 defaultPartitionTableType: gpt
@@ -164,16 +164,25 @@ operations:
 ''')
 
 print("[11/11] Calamares autostart desktop entry ...")
+# Autostart via gnome-terminal so it's always visible
 write('/etc/xdg/autostart/calamares.desktop', '''[Desktop Entry]
 Type=Application
 Name=Install RIDOS-Core
-GenericName=System Installer
-Comment=Install RIDOS-Core 1.0 Nova to your hard drive
-Exec=pkexec /usr/bin/calamares
+Exec=sh -c "sleep 15 && sudo /usr/bin/calamares"
 Icon=calamares
 Terminal=false
-StartupNotify=false
-Categories=System;
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=15
+''')
+
+# Also write a polkit rule so calamares can run without password prompt
+os.makedirs('/etc/polkit-1/rules.d', exist_ok=True)
+write('/etc/polkit-1/rules.d/49-calamares.rules', '''polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        subject.user == "ridos") {
+        return polkit.Result.YES;
+    }
+});
 ''')
 
 print("\n" + "="*55)
