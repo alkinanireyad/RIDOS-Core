@@ -359,7 +359,7 @@ jobs:
           # ── Desktop shortcuts (using printf — heredocs break YAML) ───────────
 
           # Install RIDOS-Core (Calamares)
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nComment=Install RIDOS-Core 1.0 Nova to your hard drive\nExec=sudo /usr/bin/calamares\nIcon=calamares\nTerminal=true\nCategories=System;\n' \
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nComment=Install RIDOS-Core 1.0 Nova to your hard drive\nExec=sudo /usr/bin/calamares\nIcon=calamares\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/install-ridos-core.desktop > /dev/null
 
           # Brave Browser
