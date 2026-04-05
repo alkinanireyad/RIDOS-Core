@@ -11,10 +11,9 @@ on:
 # Repository: alkinanireyad/RIDOS-Core
 # Base      : Debian 12 Bookworm + Linux 6.12 LTS
 # Desktop   : GNOME (Xorg default, Wayland available)
-# Browser   : Brave (primary) + Firefox-ESR (fallback)
-# Tools     : Full Pro IT / Security / DevOps / Recovery toolkit
-# Installer : Calamares with LUKS encryption option
-# Help      : ridos-help system for beginners and pro users
+# Browser   : Brave + Firefox-ESR
+# Installer : Custom Python/GTK installer (replaces Calamares)
+# WiFi      : Full driver support for 2008-2025 hardware
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -66,15 +65,15 @@ jobs:
               https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg && \
             echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main' \
               > /etc/apt/sources.list.d/brave-browser.list
-          " || echo "WARNING: Brave repo failed — Firefox only"
+          " || echo "WARNING: Brave repo failed"
 
-          # VS Code repo — key must be dearmored with gpg --dearmor
+          # VS Code repo
           sudo chroot chroot bash -c "
             curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
               | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
             echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' \
               > /etc/apt/sources.list.d/vscode.list
-          " || echo "WARNING: VS Code repo failed — skipping"
+          " || echo "WARNING: VS Code repo failed"
 
           sudo chroot chroot apt-get update -qq || true
 
@@ -91,28 +90,80 @@ jobs:
           sudo mount --bind /sys  chroot/sys
           sudo mount --bind /run  chroot/run
 
-          # Core boot + live
+          # ── Core boot + live ──────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             live-boot live-boot-initramfs-tools \
             linux-image-amd64 initramfs-tools \
             grub-pc-bin grub2-common grub-common \
             grub-efi-amd64-bin efibootmgr os-prober \
             bash-completion tzdata locales cryptsetup \
-            policykit-1-gnome apt-transport-https ca-certificates
+            policykit-1-gnome apt-transport-https ca-certificates \
+            parted gparted
 
           sudo chroot chroot apt-get install -y grub-pc        || true
           sudo chroot chroot apt-get install -y grub-efi-amd64 || true
 
-          # Firmware + hardware
+          # ── WiFi drivers — comprehensive 2008-2025 coverage ───────────────
+          # Intel WiFi (most common — ThinkPad, Dell, HP, Surface, NUC)
           sudo chroot chroot apt-get install -y \
-            firmware-linux firmware-linux-free firmware-linux-nonfree \
-            firmware-iwlwifi firmware-atheros firmware-realtek \
-            firmware-amd-graphics firmware-misc-nonfree \
-            intel-microcode amd64-microcode \
+            firmware-iwlwifi \
+            --no-install-recommends || true
+
+          # Atheros/Qualcomm WiFi (many laptops 2008-2020)
+          sudo chroot chroot apt-get install -y \
+            firmware-atheros \
+            --no-install-recommends || true
+
+          # Realtek WiFi (USB adapters + many budget laptops)
+          sudo chroot chroot apt-get install -y \
+            firmware-realtek \
+            --no-install-recommends || true
+
+          # Broadcom WiFi (Apple MacBooks, many HP/Dell laptops)
+          sudo chroot chroot apt-get install -y \
+            firmware-b43-installer \
+            b43-fwcutter \
+            broadcom-sta-dkms \
+            --no-install-recommends || true
+
+          # Ralink/MediaTek WiFi (2010-2022 budget laptops, USB adapters)
+          sudo chroot chroot apt-get install -y \
+            firmware-ralink \
+            --no-install-recommends || true
+
+          # Misc WiFi firmware (covers remaining chipsets)
+          sudo chroot chroot apt-get install -y \
+            firmware-misc-nonfree \
+            --no-install-recommends || true
+
+          # WiFi tools (wpa_supplicant required for all WiFi to work)
+          sudo chroot chroot apt-get install -y \
+            wpasupplicant \
+            wireless-tools \
+            rfkill \
+            usb-modeswitch \
+            usb-modeswitch-data \
+            iw
+
+          # ── Wired network drivers (2008-2025) ─────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            firmware-bnx2 \
+            firmware-bnx2x \
+            firmware-intelnic \
+            firmware-qlogic \
+            --no-install-recommends || true
+
+          # ── All remaining firmware ─────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            firmware-linux \
+            firmware-linux-free \
+            firmware-linux-nonfree \
+            intel-microcode \
+            amd64-microcode \
             fwupd fwupd-signed \
             --no-install-recommends || true
 
-          # GNOME desktop (Xorg default, Wayland available)
+          # ── GNOME desktop ─────────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             gnome-core gnome-shell gnome-session \
             gnome-terminal gnome-text-editor \
@@ -121,10 +172,10 @@ jobs:
             gnome-shell-extensions \
             gdm3 nautilus gedit \
             xwayland xorg xserver-xorg \
-            network-manager-gnome \
+            network-manager network-manager-gnome \
             gvfs gvfs-backends
 
-          # Graphics drivers
+          # ── Graphics drivers ──────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             xserver-xorg-video-all xserver-xorg-input-all \
             xserver-xorg-video-intel xserver-xorg-video-amdgpu \
@@ -134,36 +185,26 @@ jobs:
             va-driver-all \
             --no-install-recommends || true
 
-          # Audio
+          # ── Audio ─────────────────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             pulseaudio pulseaudio-utils alsa-utils
 
-          # VM guest tools
+          # ── VM guest tools ────────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             virtualbox-guest-utils virtualbox-guest-x11 \
             spice-vdagent \
             open-vm-tools open-vm-tools-desktop || true
 
-          # Brave Browser
+          # ── Browsers ──────────────────────────────────────────────────────
           sudo chroot chroot apt-get install -y brave-browser \
-            && echo "Brave OK" || echo "WARNING: Brave failed — Firefox only"
-
-          # Firefox ESR fallback
+            && echo "Brave OK" || echo "WARNING: Brave failed"
           sudo chroot chroot apt-get install -y firefox-esr
 
-          # VS Code
+          # ── VS Code ───────────────────────────────────────────────────────
           sudo chroot chroot apt-get install -y code \
             && echo "VS Code OK" || echo "WARNING: VS Code failed"
 
-          # Calamares installer
-          sudo chroot chroot apt-get install -y \
-            calamares calamares-data \
-            && echo "Calamares OK" || echo "Calamares FAILED"
-          sudo chroot chroot apt-get install -y \
-            qml-module-qtquick2 qml-module-qtquick-controls2 \
-            qml-module-qtquick-layouts python3-pyqt5 || true
-
-          # Python stack
+          # ── Python + GTK (required for custom installer) ──────────────────
           sudo chroot chroot apt-get install -y \
             python3 python3-pip python3-venv python3-tk \
             python3-gi python3-gi-cairo \
@@ -171,14 +212,14 @@ jobs:
             python3-psutil python3-requests \
             python3-flask python3-flask-socketio
 
-          # Development tools
+          # ── Development tools ─────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             build-essential gcc g++ make cmake \
             git git-gui vim nano \
             curl wget zip unzip p7zip-full \
             jq shellcheck
 
-          # Pro IT: Network & Analysis
+          # ── Pro IT: Network & Analysis ────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             nmap wireshark wireshark-common tshark \
             tcpdump netcat-openbsd ncat \
@@ -187,7 +228,7 @@ jobs:
             ipcalc arping ethtool \
             openssh-client openssh-server
 
-          # Pro IT: Security & Auditing
+          # ── Pro IT: Security & Auditing ───────────────────────────────────
           sudo chroot chroot apt-get install -y \
             aircrack-ng john hydra hashcat \
             nikto sqlmap dirb \
@@ -195,39 +236,39 @@ jobs:
             firejail wireguard wireguard-tools \
             gnupg2 openssl
 
-          # Pro IT: System Monitoring
+          # ── Pro IT: System Monitoring ─────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             htop btop iotop iftop nethogs \
             ncdu lshw dmidecode \
             smartmontools hdparm \
             sysstat lsof strace
 
-          # Pro IT: Modern CLI tools
+          # ── Pro IT: Modern CLI tools ──────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             bat ripgrep fd-find \
             neofetch tree tmux screen fzf
 
-          # Pro IT: Disk & Recovery
+          # ── Pro IT: Disk & Recovery ───────────────────────────────────────
           sudo chroot chroot apt-get install -y \
-            gparted parted testdisk gddrescue \
+            parted testdisk gddrescue \
             rsync dosfstools ntfs-3g exfat-fuse \
             squashfs-tools
 
-          # Pro IT: Containers & DevOps
+          # ── Pro IT: Containers & DevOps ───────────────────────────────────
           sudo chroot chroot apt-get install -y \
             docker.io docker-compose ansible || true
 
-          # Pro IT: Web & API tools
+          # ── Pro IT: Web & API ─────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             httpie lynx proxychains4
 
-          # System utilities
+          # ── System utilities ──────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             flatpak timeshift cockpit \
             zram-tools tlp tlp-rdw \
             bluetooth bluez \
-            network-manager wpasupplicant \
-            pciutils usbutils acpi acpid laptop-detect
+            pciutils usbutils acpi acpid laptop-detect \
+            gparted
 
           sudo umount chroot/run  || true
           sudo umount chroot/sys  || true
@@ -259,7 +300,6 @@ jobs:
 
           echo "--- Verifying user ---"
           sudo chroot chroot id ridos
-          sudo chroot chroot grep ridos /etc/passwd
 
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
@@ -274,18 +314,6 @@ jobs:
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
           sudo chroot chroot python3 /tmp/configure-system.py
-          sudo umount chroot/sys  || true
-          sudo umount chroot/proc || true
-          sudo umount chroot/dev  || true
-
-      # ── Configure Calamares (INSIDE chroot) ───────────────────────────────
-      - name: Configure Calamares
-        run: |
-          sudo cp build-system/scripts/configure-calamares.py chroot/tmp/
-          sudo mount --bind /dev  chroot/dev
-          sudo mount --bind /proc chroot/proc
-          sudo mount --bind /sys  chroot/sys
-          sudo chroot chroot python3 /tmp/configure-calamares.py
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
@@ -312,29 +340,25 @@ jobs:
             chroot/home/ridos/Desktop
 
           # Core scripts
-          sudo cp ridos-core/*.py          chroot/opt/ridos-core/bin/ 2>/dev/null || true
-          sudo cp extras/install-ollama.sh chroot/opt/ridos-core/bin/ 2>/dev/null || true
-          sudo cp extras/panic-key.py      chroot/opt/ridos-core/bin/ 2>/dev/null || true
+          sudo cp ridos-core/*.py               chroot/opt/ridos-core/bin/ 2>/dev/null || true
+          sudo cp extras/install-ollama.sh      chroot/opt/ridos-core/bin/ 2>/dev/null || true
+          sudo cp extras/panic-key.py           chroot/opt/ridos-core/bin/ 2>/dev/null || true
           sudo chmod +x chroot/opt/ridos-core/bin/*.py 2>/dev/null || true
           sudo chmod +x chroot/opt/ridos-core/bin/*.sh 2>/dev/null || true
 
-          # Help system
-          sudo cp ridos-core/ridos-help.py chroot/opt/ridos-core/bin/ 2>/dev/null || true
-          sudo chmod +x chroot/opt/ridos-core/bin/ridos-help.py 2>/dev/null || true
+          # Help system global command
+          printf '#!/bin/bash\npython3 /opt/ridos-core/bin/ridos-help.py "$@"\n' \
+            | sudo tee chroot/usr/local/bin/ridos-help > /dev/null
+          sudo chmod +x chroot/usr/local/bin/ridos-help
 
           # Legal files
           sudo cp legal/LICENSE.txt legal/COPYRIGHT legal/CONTRIBUTORS.md \
                chroot/usr/share/ridos-core/ 2>/dev/null || true
 
-          # ridos-help global command
-          printf '#!/bin/bash\npython3 /opt/ridos-core/bin/ridos-help.py "$@"\n' \
-            | sudo tee chroot/usr/local/bin/ridos-help > /dev/null
-          sudo chmod +x chroot/usr/local/bin/ridos-help
+          # ── Desktop shortcuts (printf — NO heredocs) ──────────────────────
 
-          # ── Desktop shortcuts (printf — NO heredocs to avoid YAML errors) ──
-
-          # 1. Install RIDOS-Core — uses gnome-terminal so always visible in GNOME
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nComment=Install RIDOS-Core 1.0 Nova to your hard drive\nExec=gnome-terminal -- bash -c "sudo /usr/bin/calamares; exec bash"\nIcon=calamares\nTerminal=false\nCategories=System;\n' \
+          # 1. Install RIDOS-Core — custom Python installer (no Calamares)
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Install RIDOS-Core\nComment=Install RIDOS-Core 1.0 Nova to your hard drive\nExec=gnome-terminal -- bash -c "sudo python3 /opt/ridos-core/bin/ridos-installer.py; exec bash"\nIcon=system-software-install\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/install-ridos-core.desktop > /dev/null
 
           # 2. Brave Browser
@@ -346,17 +370,17 @@ jobs:
             | sudo tee chroot/home/ridos/Desktop/ridos-tools.desktop > /dev/null
 
           # 4. Optional Tools
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Optional Tools\nComment=Install optional tools\nExec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/welcome-app.py; exec bash"\nIcon=system-software-install\nTerminal=false\nCategories=System;\n' \
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=Optional Tools\nComment=Install optional tools\nExec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/welcome-app.py; exec bash"\nIcon=preferences-system\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/ridos-welcome.desktop > /dev/null
 
           # 5. RIDOS Help
-          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=RIDOS-Core Help\nComment=Help for beginners and pro users\nExec=gnome-terminal -- bash -c "ridos-help; exec bash"\nIcon=help-browser\nTerminal=false\nCategories=System;\n' \
+          printf '[Desktop Entry]\nVersion=1.0\nType=Application\nName=RIDOS-Core Help\nComment=Help system for beginners and pro users\nExec=gnome-terminal -- bash -c "ridos-help; exec bash"\nIcon=help-browser\nTerminal=false\nCategories=System;\n' \
             | sudo tee chroot/home/ridos/Desktop/ridos-help.desktop > /dev/null
 
-          sudo chown -R 1000:1000 chroot/home/ridos          2>/dev/null || true
-          sudo chmod +x chroot/home/ridos/Desktop/*.desktop   2>/dev/null || true
-          sudo chmod -R 755 chroot/opt/ridos-core/bin         2>/dev/null || true
-          sudo chmod -R 777 chroot/opt/ridos-core/logs        2>/dev/null || true
+          sudo chown -R 1000:1000 chroot/home/ridos           2>/dev/null || true
+          sudo chmod +x chroot/home/ridos/Desktop/*.desktop    2>/dev/null || true
+          sudo chmod -R 755 chroot/opt/ridos-core/bin          2>/dev/null || true
+          sudo chmod -R 777 chroot/opt/ridos-core/logs         2>/dev/null || true
 
           sudo python3 build-system/scripts/install-ridos-files.py 2>/dev/null || true
           echo "RIDOS-Core files installed"
