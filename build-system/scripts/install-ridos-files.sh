@@ -1,88 +1,145 @@
 #!/bin/bash
-# install-ridos-files.sh
-# Called by build-iso.yml to install all RIDOS files and configure GNOME
-# Run on HOST (not chroot) from repo root
-
+# ─────────────────────────────────────────────────────────────────────────────
+# install-ridos-files.sh — RIDOS-Core 1.0 Nova
+# Repo location: build-system/scripts/install-ridos-files.sh
+# Called by build-iso.yml: sudo bash build-system/scripts/install-ridos-files.sh
+# Runs on HOST. Uses chroot/ prefix for all target paths.
+# ─────────────────────────────────────────────────────────────────────────────
 set -e
 
 echo "=== Installing RIDOS-Core files ==="
 
+# ── Directories ───────────────────────────────────────────────────────────────
 mkdir -p chroot/opt/ridos-core/bin
 mkdir -p chroot/opt/ridos-core/logs
 mkdir -p chroot/usr/share/ridos-core
+mkdir -p chroot/usr/local/bin
 mkdir -p chroot/home/ridos/Desktop
-mkdir -p chroot/etc/xdg/autostart
 mkdir -p chroot/home/ridos/.config/autostart
+mkdir -p chroot/etc/xdg/autostart
 mkdir -p chroot/usr/share/glib-2.0/schemas
+mkdir -p chroot/etc/dconf/db/local.d
+mkdir -p chroot/etc/dconf/profile
 
-# Copy all scripts from repo
+# ── Copy Python scripts ───────────────────────────────────────────────────────
 cp ridos-core/*.py chroot/opt/ridos-core/bin/
-echo "Files copied:"
+echo "Copied files:"
 ls -lh chroot/opt/ridos-core/bin/
 
-# Verify installer exists
+# Verify installer
 if [ ! -f chroot/opt/ridos-core/bin/ridos-installer.py ]; then
-  echo "ERROR: ridos-installer.py not found in ridos-core/"
+  echo "ERROR: ridos-installer.py missing from ridos-core/"
   exit 1
 fi
 echo "ridos-installer.py: OK"
 
+# ── Extras and legal ──────────────────────────────────────────────────────────
 cp extras/install-ollama.sh chroot/opt/ridos-core/bin/ 2>/dev/null || true
 cp extras/panic-key.py      chroot/opt/ridos-core/bin/ 2>/dev/null || true
 chmod +x chroot/opt/ridos-core/bin/*.py 2>/dev/null || true
 chmod +x chroot/opt/ridos-core/bin/*.sh 2>/dev/null || true
-
 cp legal/LICENSE.txt legal/COPYRIGHT legal/CONTRIBUTORS.md \
    chroot/usr/share/ridos-core/ 2>/dev/null || true
 
-# Global ridos-help command
-printf '#!/bin/bash\npython3 /opt/ridos-core/bin/ridos-help.py "$@"\n' \
-  > chroot/usr/local/bin/ridos-help
+# ── Global ridos-help command ─────────────────────────────────────────────────
+cat > chroot/usr/local/bin/ridos-help << 'EOF'
+#!/bin/bash
+python3 /opt/ridos-core/bin/ridos-help.py "$@"
+EOF
 chmod +x chroot/usr/local/bin/ridos-help
 
-# GNOME schema to enable desktop icons
+# ── Install GNOME desktop-icons extension (needs mounts) ─────────────────────
+echo "Installing GNOME desktop icons extension..."
+mount --bind /dev  chroot/dev
+mount --bind /proc chroot/proc
+mount --bind /sys  chroot/sys
+
+chroot chroot apt-get install -y gnome-shell-extension-desktop-icons 2>/dev/null \
+  || chroot chroot apt-get install -y gnome-shell-extension-desktop-icons-ng 2>/dev/null \
+  || echo "WARNING: desktop-icons extension not found in repos"
+
+# Also install GNOME tweaks for user to manage extensions
+chroot chroot apt-get install -y gnome-tweaks 2>/dev/null || true
+
+# Compile glib schemas
+chroot chroot glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
+
+umount chroot/sys  || true
+umount chroot/proc || true
+umount chroot/dev  || true
+
+# ── GNOME system-wide dconf defaults ─────────────────────────────────────────
+# Sets desktop icons on, enables extensions, sets dock favorites
+cat > chroot/etc/dconf/db/local.d/01-ridos << 'DCONF'
+[org/gnome/shell]
+enabled-extensions=['desktop-icons@csoriano', 'desktop-icons-ng@csoriano']
+favorite-apps=['brave-browser.desktop', 'org.gnome.Terminal.desktop', 'org.gnome.Nautilus.desktop', 'org.gnome.Software.desktop']
+
+[org/gnome/desktop/background]
+show-desktop-icons=true
+
+[org/gnome/nautilus/desktop]
+home-icon-visible=false
+trash-icon-visible=true
+
+[org/gnome/desktop/interface]
+clock-show-date=true
+show-battery-percentage=true
+DCONF
+
+cat > chroot/etc/dconf/profile/user << 'DCONF'
+user-db:user
+system-db:local
+DCONF
+
+# Compile dconf database
+chroot chroot dconf update 2>/dev/null || true
+
+# ── GLib schema override (belt + suspenders) ──────────────────────────────────
 cat > chroot/usr/share/glib-2.0/schemas/99-ridos-desktop.gschema.override << 'SCHEMA'
 [org.gnome.desktop.background]
 show-desktop-icons=true
+
+[org.gnome.nautilus.desktop]
+home-icon-visible=false
+trash-icon-visible=true
 SCHEMA
-
-# Install gnome-shell-extension-desktop-icons if available
-chroot chroot apt-get install -y gnome-shell-extension-desktop-icons 2>/dev/null \
-  || chroot chroot apt-get install -y gnome-shell-extension-desktop-icons-ng 2>/dev/null || true
-
-# Compile schemas
 chroot chroot glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
 
-# Autostart installer — written to BOTH system and user autostart locations
-for DEST in \
-  chroot/etc/xdg/autostart/ridos-installer.desktop \
-  chroot/home/ridos/.config/autostart/ridos-installer.desktop
-do
-  cat > "$DEST" << 'AUTOSTART'
+# ── Autostart installer ───────────────────────────────────────────────────────
+# FIX: Write to ONLY /etc/xdg/autostart — NOT to ~/.config/autostart
+# Writing to both caused TWO popups. System autostart is sufficient.
+cat > chroot/etc/xdg/autostart/ridos-installer.desktop << 'AUTOSTART'
 [Desktop Entry]
 Type=Application
-Name=RIDOS-Core Installer
-Comment=Install RIDOS-Core to your hard drive
-Exec=bash -c "sleep 10 && gnome-terminal --title=Install-RIDOS-Core -- bash -c 'sudo python3 /opt/ridos-core/bin/ridos-installer.py; exec bash'"
+Name=Install RIDOS-Core
+GenericName=System Installer
+Comment=Install RIDOS-Core 1.0 Nova to your hard drive
+Exec=bash -c "sleep 10 && gnome-terminal --title=RIDOS-Installer -- bash -c 'sudo python3 /opt/ridos-core/bin/ridos-installer.py; exec bash'"
 Icon=system-software-install
 Terminal=false
 X-GNOME-Autostart-enabled=true
 X-GNOME-Autostart-Delay=10
 StartupNotify=false
+NotShowIn=KDE;
 AUTOSTART
-done
 
-# Desktop shortcuts
+# Remove the user-level duplicate that was causing two popups
+rm -f chroot/home/ridos/.config/autostart/ridos-installer.desktop
+
+# ── Desktop shortcuts ─────────────────────────────────────────────────────────
 cat > chroot/home/ridos/Desktop/install-ridos-core.desktop << 'DESK'
 [Desktop Entry]
 Version=1.0
 Type=Application
 Name=Install RIDOS-Core
+GenericName=System Installer
 Comment=Install RIDOS-Core 1.0 Nova to your hard drive
-Exec=gnome-terminal --title=Install-RIDOS-Core -- bash -c "sudo python3 /opt/ridos-core/bin/ridos-installer.py; exec bash"
+Exec=gnome-terminal --title=RIDOS-Installer -- bash -c "sudo python3 /opt/ridos-core/bin/ridos-installer.py; exec bash"
 Icon=system-software-install
 Terminal=false
 Categories=System;
+StartupNotify=true
 DESK
 
 cat > chroot/home/ridos/Desktop/brave-browser.desktop << 'DESK'
@@ -90,6 +147,7 @@ cat > chroot/home/ridos/Desktop/brave-browser.desktop << 'DESK'
 Version=1.0
 Type=Application
 Name=Brave Browser
+Comment=Fast, private browser
 Exec=brave-browser %U
 Icon=brave-browser
 Terminal=false
@@ -101,6 +159,7 @@ cat > chroot/home/ridos/Desktop/ridos-tools.desktop << 'DESK'
 Version=1.0
 Type=Application
 Name=RIDOS-Core IT Tools
+Comment=Pro IT toolkit
 Exec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/ridos_shell.py; exec bash"
 Icon=utilities-terminal
 Terminal=false
@@ -112,6 +171,7 @@ cat > chroot/home/ridos/Desktop/ridos-welcome.desktop << 'DESK'
 Version=1.0
 Type=Application
 Name=Optional Tools
+Comment=Install optional tools for RIDOS-Core
 Exec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/welcome-app.py; exec bash"
 Icon=preferences-system
 Terminal=false
@@ -123,18 +183,31 @@ cat > chroot/home/ridos/Desktop/ridos-help.desktop << 'DESK'
 Version=1.0
 Type=Application
 Name=RIDOS-Core Help
+Comment=Help for beginners and pro users
 Exec=gnome-terminal -- bash -c "ridos-help; exec bash"
 Icon=help-browser
 Terminal=false
 Categories=System;
 DESK
 
-# Mark desktop files as trusted and set permissions
+# ── Permissions ───────────────────────────────────────────────────────────────
 chmod +x chroot/home/ridos/Desktop/*.desktop
 chown -R 1000:1000 chroot/home/ridos
 chmod -R 755 chroot/opt/ridos-core/bin
 chmod -R 777 chroot/opt/ridos-core/logs
 
-echo "=== All RIDOS-Core files installed ==="
-echo "    Installer autostart: 10s after GNOME loads"
-echo "    Desktop icons: 5 shortcuts created"
+# ── Verification ──────────────────────────────────────────────────────────────
+echo ""
+echo "=== Verification ==="
+echo "Installer:"
+ls -lh chroot/opt/ridos-core/bin/ridos-installer.py
+echo "Desktop shortcuts:"
+ls -la chroot/home/ridos/Desktop/
+echo "Autostart (system only — no duplicate):"
+ls -la chroot/etc/xdg/autostart/
+echo ""
+echo "=== install-ridos-files.sh complete ==="
+echo "    ONE autostart entry (no duplicate popup)"
+echo "    Desktop icons extension installed"
+echo "    dconf defaults set for GNOME"
+echo "    5 desktop shortcuts created"
