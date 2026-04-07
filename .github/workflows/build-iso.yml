@@ -13,24 +13,7 @@ on:
 # Desktop    : GNOME (Xorg default, Wayland available)
 # Browser    : Brave (primary) + Firefox-ESR (fallback)
 # Installer  : ridos-installer.py — custom GTK (autostarts 10s after GNOME)
-# WiFi       : Full driver support 2008-2025
-# Desktop icons: gnome-shell-extension-desktop-icons installed and enabled
-#
-# Required files in repo:
-#   ridos-core/ridos-installer.py
-#   ridos-core/ridos-help.py
-#   ridos-core/welcome-app.py
-#   ridos-core/ridos_shell.py
-#   ridos-core/ai_daemon.py
-#   build-system/scripts/configure-system.py
-#   build-system/scripts/apply-branding.py
-#   build-system/scripts/write-grub-config.py
-#   build-system/scripts/install-ridos-files.sh   <- NEW
-#   extras/install-ollama.sh
-#   extras/panic-key.py
-#   legal/LICENSE.txt
-#   legal/COPYRIGHT
-#   legal/CONTRIBUTORS.md
+# WiFi       : Full driver support 2008-2025 including HP MediaTek/Realtek
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -42,7 +25,6 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      # ── Verify all required files exist in repo before starting ───────────
       - name: Verify required files
         run: |
           echo "=== Checking required repo files ==="
@@ -58,23 +40,12 @@ jobs:
             "build-system/scripts/install-ridos-files.sh" \
             "legal/LICENSE.txt"
           do
-            if [ -f "$f" ]; then
-              echo "  OK      : $f"
-            else
-              echo "  MISSING : $f"
-              MISSING=$((MISSING+1))
-            fi
+            if [ -f "$f" ]; then echo "  OK      : $f"
+            else echo "  MISSING : $f"; MISSING=$((MISSING+1)); fi
           done
-          if [ $MISSING -gt 0 ]; then
-            echo ""
-            echo "ERROR: $MISSING required files are missing from the repo."
-            echo "Upload them to GitHub before running this workflow."
-            exit 1
-          fi
-          echo ""
-          echo "All required files present. Build starting."
+          [ $MISSING -eq 0 ] || { echo "ERROR: $MISSING files missing"; exit 1; }
+          echo "All required files present."
 
-      # ── Host build tools ──────────────────────────────────────────────────
       - name: Install build dependencies
         run: |
           sudo apt-get update -qq
@@ -85,55 +56,47 @@ jobs:
             imagemagick librsvg2-bin python3-pip
           echo "Build dependencies ready"
 
-      # ── Bootstrap minimal Debian bookworm base ────────────────────────────
       - name: Bootstrap Debian bookworm
         run: |
           curl -fsSL https://ftp-master.debian.org/keys/release-12.asc \
             | sudo gpg --dearmor -o /usr/share/keyrings/debian-bookworm.gpg
           sudo debootstrap \
-            --arch=amd64 \
-            --variant=minbase \
+            --arch=amd64 --variant=minbase \
             --keyring=/usr/share/keyrings/debian-bookworm.gpg \
             --include=systemd,systemd-sysv,udev,sudo,locales,bash \
             bookworm chroot http://deb.debian.org/debian/
           echo "Bootstrap done"
 
-      # ── Add Brave and VS Code repos ───────────────────────────────────────
       - name: Add third-party repositories
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
 
-          # Debian repos with non-free firmware
           printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\ndeb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\ndeb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
             | sudo tee chroot/etc/apt/sources.list > /dev/null
 
-          # Brave Browser official repo
           sudo chroot chroot bash -c "
             apt-get install -y curl gnupg2 apt-transport-https ca-certificates 2>/dev/null || true
             curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
               https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg && \
             echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main' \
               > /etc/apt/sources.list.d/brave-browser.list
-          " || echo "WARNING: Brave repo failed — Firefox only"
+          " || echo "WARNING: Brave repo failed"
 
-          # VS Code official repo — key must be dearmored with gpg --dearmor
           sudo chroot chroot bash -c "
             curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
               | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
             echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' \
               > /etc/apt/sources.list.d/vscode.list
-          " || echo "WARNING: VS Code repo failed — skipping"
+          " || echo "WARNING: VS Code repo failed"
 
           sudo chroot chroot apt-get update -qq || true
-
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
           echo "Repositories configured"
 
-      # ── Install all packages ──────────────────────────────────────────────
       - name: Install all packages
         run: |
           sudo mount --bind /dev  chroot/dev
@@ -142,55 +105,99 @@ jobs:
           sudo mount --bind /run  chroot/run
 
           # ── Core boot + live system ───────────────────────────────────────
+          # linux-headers-amd64 added: required for DKMS WiFi drivers to compile
           sudo chroot chroot apt-get install -y \
             live-boot live-boot-initramfs-tools \
-            linux-image-amd64 initramfs-tools \
+            linux-image-amd64 linux-headers-amd64 initramfs-tools \
             grub-pc-bin grub2-common grub-common \
             grub-efi-amd64-bin efibootmgr os-prober \
             bash-completion tzdata locales cryptsetup \
             policykit-1-gnome apt-transport-https ca-certificates \
-            parted gparted squashfs-tools
+            parted gparted squashfs-tools \
+            dkms build-essential
 
-          # grub meta-packages installed separately to avoid conflict
           sudo chroot chroot apt-get install -y grub-pc        || true
           sudo chroot chroot apt-get install -y grub-efi-amd64 || true
 
-          # ── WiFi drivers — 2008 to 2025 ───────────────────────────────────
-          # Intel (most laptops: ThinkPad, Dell XPS, HP, Surface, NUC)
-          sudo chroot chroot apt-get install -y firmware-iwlwifi \
+          # ── WiFi drivers — comprehensive 2008-2025 coverage ───────────────
+          # Each family is separate so one failure does not block others.
+
+          # Intel WiFi — most common (ThinkPad, Dell XPS, HP Spectre/Envy/EliteBook)
+          sudo chroot chroot apt-get install -y \
+            firmware-iwlwifi \
             --no-install-recommends || true
-          # Atheros/Qualcomm (2008-2020 laptops)
-          sudo chroot chroot apt-get install -y firmware-atheros \
+
+          # Atheros/Qualcomm WiFi — many 2008-2020 laptops
+          sudo chroot chroot apt-get install -y \
+            firmware-atheros \
             --no-install-recommends || true
-          # Realtek (budget laptops + USB WiFi adapters)
-          sudo chroot chroot apt-get install -y firmware-realtek \
+
+          # Realtek WiFi — budget laptops + USB adapters
+          # Covers RTL8188/RTL8192/RTL8723/RTL8821/RTL8822/RTL8852
+          sudo chroot chroot apt-get install -y \
+            firmware-realtek \
             --no-install-recommends || true
-          # Ralink/MediaTek (2010-2022 budget laptops)
-          sudo chroot chroot apt-get install -y firmware-ralink \
+
+          # Realtek RTL8821CE DKMS driver — HP 250/255/15/14 2018-2021
+          # This is the most common missing HP WiFi driver
+          sudo chroot chroot apt-get install -y \
+            rtl8821ce-dkms \
             --no-install-recommends || true
-          # Broadcom (MacBooks, many HP/Dell 2010-2018)
+
+          # Realtek RTL88x2bu DKMS — USB WiFi adapters (TP-Link, Asus)
+          sudo chroot chroot apt-get install -y \
+            rtl88x2bu-dkms \
+            --no-install-recommends || true
+
+          # Ralink/MediaTek WiFi — 2010-2022 budget laptops
+          sudo chroot chroot apt-get install -y \
+            firmware-ralink \
+            --no-install-recommends || true
+
+          # MediaTek MT7921/MT7922 — HP laptops 2021-2024
+          # This is the second most common missing HP WiFi driver
+          sudo chroot chroot apt-get install -y \
+            firmware-mediatek \
+            --no-install-recommends || true
+
+          # Broadcom WiFi — MacBooks, HP/Dell 2010-2018
           sudo chroot chroot apt-get install -y \
             firmware-b43-installer b43-fwcutter \
             --no-install-recommends || true
-          # Wired NIC firmware (Broadcom/Intel/QLogic NICs)
+
+          # Broadcom STA driver (wl) — older Broadcom chips
+          sudo chroot chroot apt-get install -y \
+            broadcom-sta-dkms \
+            --no-install-recommends || true
+
+          # Wired NIC firmware
           sudo chroot chroot apt-get install -y \
             firmware-bnx2 firmware-bnx2x firmware-intelnic \
             --no-install-recommends || true
-          # All remaining firmware
+
+          # All remaining firmware + microcode
           sudo chroot chroot apt-get install -y \
-            firmware-misc-nonfree firmware-linux \
-            firmware-linux-free firmware-linux-nonfree \
-            intel-microcode amd64-microcode \
+            firmware-misc-nonfree \
+            firmware-linux \
+            firmware-linux-free \
+            firmware-linux-nonfree \
+            intel-microcode \
+            amd64-microcode \
             fwupd fwupd-signed \
             --no-install-recommends || true
-          # WiFi tools — required for all WiFi to work
+
+          # WiFi management tools — required for ALL WiFi to function
           sudo chroot chroot apt-get install -y \
-            wpasupplicant wireless-tools rfkill \
-            usb-modeswitch usb-modeswitch-data iw
+            wpasupplicant \
+            wireless-tools \
+            rfkill \
+            usb-modeswitch \
+            usb-modeswitch-data \
+            iw \
+            network-manager \
+            network-manager-gnome
 
           # ── GNOME desktop ─────────────────────────────────────────────────
-          # Xorg is default for VirtualBox compatibility
-          # Wayland session available at GDM login screen
           sudo chroot chroot apt-get install -y \
             gnome-core gnome-shell gnome-session \
             gnome-terminal gnome-text-editor \
@@ -199,7 +206,7 @@ jobs:
             gnome-shell-extensions gnome-menus \
             gdm3 nautilus gedit \
             xwayland xorg xserver-xorg \
-            network-manager network-manager-gnome \
+            network-manager-gnome \
             gvfs gvfs-backends \
             dconf-cli dconf-gsettings-backend
 
@@ -222,18 +229,16 @@ jobs:
             spice-vdagent \
             open-vm-tools open-vm-tools-desktop || true
 
-          # ── Brave Browser ─────────────────────────────────────────────────
+          # ── Browsers ──────────────────────────────────────────────────────
           sudo chroot chroot apt-get install -y brave-browser \
-            && echo "Brave OK" || echo "WARNING: Brave failed — Firefox only"
-
-          # ── Firefox ESR fallback ──────────────────────────────────────────
+            && echo "Brave OK" || echo "WARNING: Brave failed"
           sudo chroot chroot apt-get install -y firefox-esr
 
           # ── VS Code ───────────────────────────────────────────────────────
           sudo chroot chroot apt-get install -y code \
             && echo "VS Code OK" || echo "WARNING: VS Code failed"
 
-          # ── Python + GTK (required for custom installer and tools) ────────
+          # ── Python + GTK (required for installer) ─────────────────────────
           sudo chroot chroot apt-get install -y \
             python3 python3-pip python3-venv python3-tk \
             python3-gi python3-gi-cairo \
@@ -243,42 +248,26 @@ jobs:
 
           # ── Development tools ─────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
-            build-essential gcc g++ make cmake \
+            gcc g++ make cmake \
             git git-gui vim nano \
             curl wget zip unzip p7zip-full \
             jq shellcheck
 
           # ── Pro IT: Network & Analysis ────────────────────────────────────
           sudo chroot chroot apt-get install -y \
-            nmap \
-            wireshark wireshark-common tshark \
-            tcpdump \
-            netcat-openbsd ncat \
-            traceroute \
-            mtr-tiny \
-            iperf3 \
-            net-tools \
-            dnsutils \
-            whois \
-            ipcalc \
-            arping \
-            ethtool \
+            nmap wireshark wireshark-common tshark \
+            tcpdump netcat-openbsd ncat \
+            traceroute mtr-tiny iperf3 \
+            net-tools dnsutils whois \
+            ipcalc arping ethtool \
             openssh-client openssh-server
 
-          # ── Pro IT: Security & Auditing ───────────────────────────────────
+          # ── Pro IT: Security ──────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
-            aircrack-ng \
-            john \
-            hydra \
-            hashcat \
-            nikto \
-            sqlmap \
-            dirb \
-            steghide \
-            binwalk \
-            foremost \
-            firejail \
-            wireguard wireguard-tools \
+            aircrack-ng john hydra hashcat \
+            nikto sqlmap dirb \
+            steghide binwalk foremost \
+            firejail wireguard wireguard-tools \
             gnupg2 openssl
 
           # ── Pro IT: System Monitoring ─────────────────────────────────────
@@ -299,11 +288,11 @@ jobs:
             rsync dosfstools ntfs-3g exfat-fuse \
             squashfs-tools
 
-          # ── Pro IT: Containers & DevOps ───────────────────────────────────
+          # ── Containers & DevOps ───────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             docker.io docker-compose ansible || true
 
-          # ── Pro IT: Web & API tools ───────────────────────────────────────
+          # ── Web & API tools ───────────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
             httpie lynx proxychains4
 
@@ -320,33 +309,27 @@ jobs:
           sudo umount chroot/dev  || true
           echo "All packages installed successfully"
 
-      # ── Create ridos user INSIDE chroot ───────────────────────────────────
       - name: Create ridos user
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
 
-          # Create user with home dir and groups
           sudo chroot chroot useradd \
             --create-home --shell /bin/bash \
             --groups sudo,audio,video,netdev,plugdev \
             ridos 2>/dev/null || true
 
-          # username=ridos  password=ridos
           echo "ridos:ridos" | sudo chroot chroot chpasswd
           echo "root:ridos"  | sudo chroot chroot chpasswd
 
-          # Passwordless sudo for live session
           printf 'ridos ALL=(ALL) NOPASSWD:ALL\n' \
             | sudo tee chroot/etc/sudoers.d/ridos > /dev/null
           sudo chmod 440 chroot/etc/sudoers.d/ridos
 
-          # Add to extra groups
           sudo chroot chroot usermod -aG wireshark ridos 2>/dev/null || true
           sudo chroot chroot usermod -aG docker    ridos 2>/dev/null || true
 
-          # Verify
           echo "--- Verifying user ---"
           sudo chroot chroot id ridos
           sudo chroot chroot grep ridos /etc/passwd
@@ -354,9 +337,8 @@ jobs:
           sudo umount chroot/sys  || true
           sudo umount chroot/proc || true
           sudo umount chroot/dev  || true
-          echo "User ridos created: username=ridos password=ridos"
+          echo "User ridos: username=ridos password=ridos"
 
-      # ── Configure system (INSIDE chroot) ──────────────────────────────────
       - name: Configure system
         run: |
           sudo cp build-system/scripts/configure-system.py chroot/tmp/
@@ -369,7 +351,6 @@ jobs:
           sudo umount chroot/dev  || true
           echo "System configured"
 
-      # ── Apply branding (INSIDE chroot) ────────────────────────────────────
       - name: Apply branding
         run: |
           sudo cp build-system/scripts/apply-branding.py chroot/tmp/
@@ -382,27 +363,17 @@ jobs:
           sudo umount chroot/dev  || true
           echo "Branding applied"
 
-      # ── Install RIDOS files via shell script ──────────────────────────────
-      # install-ridos-files.sh handles:
-      #   - copying all Python scripts from ridos-core/
-      #   - installing gnome-shell-extension-desktop-icons (WITH mounts)
-      #   - writing GNOME dconf/gschema overrides to enable desktop icons
-      #   - writing autostart .desktop to /etc/xdg/autostart AND ~/.config/autostart
-      #   - writing 5 desktop shortcuts
-      #   - setting all permissions and ownership
       - name: Install RIDOS-Core files
         run: |
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
 
-      # ── Build squashfs with zstd ──────────────────────────────────────────
       - name: Build squashfs filesystem
         run: |
           sudo mksquashfs chroot filesystem.squashfs \
             -comp zstd -Xcompression-level 15 -e boot -noappend
           echo "squashfs size: $(du -sh filesystem.squashfs | cut -f1)"
 
-      # ── Assemble ISO directory structure ──────────────────────────────────
       - name: Prepare ISO structure
         run: |
           mkdir -p iso/live iso/boot/grub
@@ -417,35 +388,27 @@ jobs:
           cp "$KERNEL" iso/live/vmlinuz
           cp "$INITRD" iso/live/initrd
           python3 build-system/scripts/write-grub-config.py
-          echo "ISO structure ready"
-          echo "  kernel : $KERNEL"
-          echo "  initrd : $INITRD"
+          echo "ISO structure ready — kernel: $KERNEL"
 
-      # ── Build hybrid BIOS+EFI bootable ISO ────────────────────────────────
       - name: Build GRUB and create bootable ISO
         run: |
-          # BIOS boot image
           grub-mkimage -O i386-pc -o bios.core.img \
             -p "/boot/grub" iso9660 linux normal biosdisk search
           cat /usr/lib/grub/i386-pc/cdboot.img bios.core.img > bios.img
 
-          # EFI boot image
           grub-mkimage -O x86_64-efi -o bootx64.efi \
             -p "/boot/grub" iso9660 linux normal search
 
-          # EFI FAT partition
           dd if=/dev/zero of=efi.img bs=1M count=10 status=none
           mkfs.vfat -F 12 efi.img
           mmd  -i efi.img ::/EFI ::/EFI/boot
           mcopy -i efi.img bootx64.efi ::/EFI/boot/bootx64.efi
 
-          # GRUB modules into ISO tree
           mkdir -p iso/boot/grub/i386-pc
           cp /usr/lib/grub/i386-pc/*.mod iso/boot/grub/i386-pc/ 2>/dev/null || true
           cp /usr/lib/grub/i386-pc/*.lst iso/boot/grub/i386-pc/ 2>/dev/null || true
           cp bios.img iso/boot/grub/bios.img
 
-          # Build hybrid ISO
           xorriso -as mkisofs \
             -iso-level 3 \
             -full-iso9660-filenames \
@@ -478,7 +441,6 @@ jobs:
             > ridos-core-1.0-nova-x86_64.iso.sha256
           echo "ISO ready!"
 
-      # ── Upload artifact ───────────────────────────────────────────────────
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
@@ -489,7 +451,6 @@ jobs:
             ridos-core-1.0-nova-x86_64.iso.sha256
           retention-days: 30
 
-      # ── Create GitHub Release on version tag ──────────────────────────────
       - name: Create GitHub Release on tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -498,6 +459,6 @@ jobs:
             ridos-core-1.0-nova-x86_64.iso.md5 \
             ridos-core-1.0-nova-x86_64.iso.sha256 \
             --title "RIDOS-Core ${{ github.ref_name }} Nova" \
-            --notes "RIDOS-Core 1.0 Nova — Rust-Ready Linux with Pro IT Tools + Brave Browser. Login: ridos/ridos. GPL v3. Repo: alkinanireyad/RIDOS-Core"
+            --notes "RIDOS-Core 1.0 Nova — Rust-Ready Linux. Login: ridos/ridos. GPL v3."
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
