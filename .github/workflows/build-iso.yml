@@ -8,8 +8,6 @@ on:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIDOS-Core 1.0 Nova
-# Repository : alkinanireyad/RIDOS-Core
-# Base       : Debian 12 Bookworm + Linux 6.12 LTS
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
@@ -43,14 +41,10 @@ jobs:
               MISSING=$((MISSING+1))
             fi
           done
-          if [ $MISSING -ne 0 ]; then
-            echo "ERROR: $MISSING files missing"
-            exit 1
-          fi
+          [ $MISSING -eq 0 ] || exit 1
 
       - name: Install build dependencies
         run: |
-          # إضافة مستودع حديث لضمان توفر مكتبات GTK4 >= 4.7
           sudo add-apt-repository ppa:gnome-team/ppa -y
           sudo apt-get update -qq
           sudo apt-get install -y \
@@ -71,13 +65,8 @@ jobs:
             libgtk-4-dev \
             pkg-config \
             libadwaita-1-dev \
-            build-essential \
-            libglib2.0-dev \
-            libpango1.0-dev \
-            libcairo2-dev
-          echo "Build dependencies ready (GTK4 Fixed via PPA)"
-
-      - name: Bootstrap Debian bookworm
+            build-essential
+           - name: Bootstrap Debian system
         run: |
           curl -fsSL https://ftp-master.debian.org/keys/release-12.asc \
             | sudo gpg --dearmor -o /usr/share/keyrings/debian-bookworm.gpg
@@ -87,13 +76,13 @@ jobs:
             --keyring=/usr/share/keyrings/debian-bookworm.gpg \
             --include=systemd,systemd-sysv,udev,sudo,locales,bash \
             bookworm chroot http://deb.debian.org/debian/
-            - name: Add third-party repositories
+
+      - name: Configure repositories
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
-
-          # Configure Debian repositories
+          
           printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\n' \
             | sudo tee chroot/etc/apt/sources.list
           printf 'deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\n' \
@@ -101,27 +90,21 @@ jobs:
           printf 'deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
             | sudo tee -a chroot/etc/apt/sources.list
 
-          # Install repository management tools
           sudo chroot chroot apt-get update
-          sudo chroot chroot apt-get install -y \
-            curl \
-            gnupg2 \
-            ca-certificates \
-            apt-transport-https
+          sudo chroot chroot apt-get install -y curl gnupg2 ca-certificates apt-transport-https
 
-          # Add Brave Browser repository
+          # Brave Repo
           sudo chroot chroot bash -c "curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg"
           echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main' \
             | sudo tee chroot/etc/apt/sources.list.d/brave-browser.list
 
-          # Add VS Code repository
+          # VS Code Repo
           sudo chroot chroot bash -c "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg"
           echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' \
             | sudo tee chroot/etc/apt/sources.list.d/vscode.list
-
+          
           sudo chroot chroot apt-get update
           sudo umount chroot/sys chroot/proc chroot/dev || true
-
       - name: Install base system packages
         run: |
           sudo mount --bind /dev  chroot/dev
