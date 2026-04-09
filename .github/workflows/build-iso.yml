@@ -66,8 +66,9 @@ jobs:
             pkg-config \
             libadwaita-1-dev \
             build-essential
-           - name: Bootstrap Debian system
+            - name: Bootstrap and Configure Repositories
         run: |
+          # Bootstrap Debian system
           curl -fsSL https://ftp-master.debian.org/keys/release-12.asc \
             | sudo gpg --dearmor -o /usr/share/keyrings/debian-bookworm.gpg
           sudo debootstrap \
@@ -77,8 +78,7 @@ jobs:
             --include=systemd,systemd-sysv,udev,sudo,locales,bash \
             bookworm chroot http://deb.debian.org/debian/
 
-      - name: Configure repositories
-        run: |
+          # Mount for configuration
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
@@ -105,92 +105,33 @@ jobs:
           
           sudo chroot chroot apt-get update
           sudo umount chroot/sys chroot/proc chroot/dev || true
-      - name: Install base system packages
+          - name: Install Base and Firmware Packages
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
-          
+          sudo mount --bind /run  chroot/run
+
+          # تحديث المستودعات داخل chroot
+          sudo chroot chroot apt-get update -qq
+
+          # تثبيت كيرنل ونظام الإقلاع
           sudo chroot chroot apt-get install -y \
             live-boot \
             live-boot-initramfs-tools \
             linux-image-amd64 \
+            linux-headers-amd64 \
             initramfs-tools \
             grub-pc-bin \
             grub-efi-amd64-bin \
-            grub2-common \
             efibootmgr \
             os-prober \
-            bash-completion \
-            sudo \
-            locales \
-            tzdata \
-            network-manager \
-            network-manager-gnome \
-            firmware-linux \
-            firmware-linux-free \
-            firmware-linux-
-            - name: Add third-party repositories
-        run: |
-          sudo mount --bind /dev  chroot/dev
-          sudo mount --bind /proc chroot/proc
-          sudo mount --bind /sys  chroot/sys
+            parted \
+            dkms \
+            build-essential
 
-          # Configure Debian repositories
-          printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\n' \
-            | sudo tee chroot/etc/apt/sources.list
-          printf 'deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\n' \
-            | sudo tee -a chroot/etc/apt/sources.list
-          printf 'deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
-            | sudo tee -a chroot/etc/apt/sources.list
-
-          # Install repository management tools
-          sudo chroot chroot apt-get update
+          # دعم شامل لتعريفات الوايفاي (Realtek, Intel, MediaTek, Broadcom)
           sudo chroot chroot apt-get install -y \
-            curl \
-            gnupg2 \
-            ca-certificates \
-            apt-transport-https
-
-          # Add Brave Browser repository
-          sudo chroot chroot bash -c "curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg"
-          echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main' \
-            | sudo tee chroot/etc/apt/sources.list.d/brave-browser.list
-
-          # Add VS Code repository
-          sudo chroot chroot bash -c "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg"
-          echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' \
-            | sudo tee chroot/etc/apt/sources.list.d/vscode.list
-
-          sudo chroot chroot apt-get update
-          sudo umount chroot/sys chroot/proc chroot/dev || true
-
-      - name: Install base system packages
-        run: |
-          sudo mount --bind /dev  chroot/dev
-          sudo mount --bind /proc chroot/proc
-          sudo mount --bind /sys  chroot/sys
-          
-          sudo chroot chroot apt-get install -y \
-            live-boot \
-            live-boot-initramfs-tools \
-            linux-image-amd64 \
-            initramfs-tools \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            grub2-common \
-            efibootmgr \
-            os-prober \
-            bash-completion \
-            sudo \
-            locales \
-            tzdata \
-            network-manager \
-            network-manager-gnome \
-            firmware-linux \
-            firmware-linux-free \
-            firmware-linux-nonfree
-            sudo chroot chroot apt-get install -y \
             firmware-iwlwifi \
             firmware-atheros \
             firmware-realtek \
@@ -200,9 +141,6 @@ jobs:
             firmware-misc-nonfree \
             firmware-amd-graphics \
             firmware-intel-graphics \
-            firmware-bnx2 \
-            firmware-bnx2x \
-            firmware-qlogic \
             intel-microcode \
             amd64-microcode \
             wireless-tools \
@@ -212,25 +150,22 @@ jobs:
             pciutils \
             usbutils \
             lsb-release \
-            hwdata \
-            dkms \
-            build-essential
+            hwdata --no-install-recommends || true
 
-          # Specific drivers for newer HP/Realtek cards (2020-2025)
+          # تعريفات إضافية لكروت HP والقطع الحديثة
           sudo chroot chroot apt-get install -y \
             rtl8821ce-dkms \
             rtl88x2bu-dkms \
             firmware-mediatek || true
 
-          sudo umount chroot/sys chroot/proc chroot/dev || true
-
-      - name: Install Desktop Environment (GNOME)
+          sudo umount chroot/run chroot/sys chroot/proc chroot/dev || true
+          - name: Install Desktop and Pro Tools
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
-          
-          # Installing core GNOME components
+
+          # تثبيت واجهة GNOME Core
           sudo chroot chroot apt-get install -y \
             gnome-core \
             gnome-shell \
@@ -240,173 +175,112 @@ jobs:
             gnome-tweaks \
             nautilus \
             gdm3 \
-            xserver-xorg \
-            xserver-xorg-video-all \
-            xserver-xorg-input-all \
-            desktop-base \
-            adwaita-icon-theme \
-            fonts-cantarell \
-            fonts-noto-core \
-            fonts-noto-cjk \
-            fonts-noto-ui-core
+            xserver-xorg-video-all
 
-          sudo umount chroot/sys chroot/proc chroot/dev || true
-
-      - name: Install Browser and Main Apps
-        run: |
-          sudo mount --bind /dev  chroot/dev
-          sudo mount --bind /proc chroot/proc
-          sudo mount --bind /sys  chroot/sys
-
+          # تثبيت المتصفحات وأدوات التطوير
           sudo chroot chroot apt-get install -y \
             brave-browser \
             firefox-esr \
             code \
             python3-gi \
-            python3-requests \
             python3-pip \
-            python3-yaml \
             gir1.2-gtk-4.0 \
             libadwaita-1-0 \
             vlc \
             gparted \
             htop \
             btop \
-            curl \
-            wget \
             git
-            # --- IT & Cybersecurity Tools (Pro Suite) ---
+
+          # أدوات المحترفين (Cybersecurity & Networking)
           sudo chroot chroot apt-get install -y \
             nmap \
             wireshark \
             tcpdump \
-            netcat-openbsd \
-            traceroute \
             aircrack-ng \
             john \
             hydra \
             hashcat \
-            nikto \
             sqlmap \
             docker.io \
-            docker-compose \
-            ansible \
-            cockpit
+            cockpit || true
 
           sudo umount chroot/sys chroot/proc chroot/dev || true
-
-      - name: Create RIDOS User and Permissions
+          - name: Configure User and Branding
         run: |
+          # إعداد المستخدم والصلاحيات
           sudo chroot chroot useradd -m -s /bin/bash -G sudo,audio,video,docker,wireshark ridos || true
           echo "ridos:ridos" | sudo chroot chroot chpasswd
           echo "root:ridos"  | sudo chroot chroot chpasswd
-          
-          # Allow sudo without password for the installer experience
-          printf 'ridos ALL=(ALL) NOPASSWD:ALL\n' \
-            | sudo tee chroot/etc/sudoers.d/ridos > /dev/null
+          printf 'ridos ALL=(ALL) NOPASSWD:ALL\n' | sudo tee chroot/etc/sudoers.d/ridos > /dev/null
           sudo chmod 0440 chroot/etc/sudoers.d/ridos
 
-      - name: Apply System Configurations and Branding
-        run: |
+          # تطبيق الهوية البصرية وإعدادات النظام
           sudo cp build-system/scripts/configure-system.py chroot/tmp/
           sudo cp build-system/scripts/apply-branding.py chroot/tmp/
-          
           sudo mount --bind /dev chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys chroot/sys
-          
           sudo chroot chroot python3 /tmp/configure-system.py
           sudo chroot chroot python3 /tmp/apply-branding.py || true
-          
           sudo umount chroot/sys chroot/proc chroot/dev || true
 
-      - name: Build RIDOS Welcome App (Rust + GTK4)
+      - name: Build RIDOS Welcome (Rust + GTK4)
         run: |
           if [ -d "ridos-welcome" ]; then
             cd ridos-welcome
-            # استخدام مسارات المكتبات التي تم تثبيتها من الـ PPA لضمان نجاح الربط
+            # استخدام مسارات المكتبات الصحيحة لنجاح عملية الربط
             export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
             cargo build --release
-            
-            # حقن الملف التنفيذي مباشرة في مسار النظام داخل الـ chroot
             sudo mkdir -p ../chroot/usr/bin/
             sudo cp target/release/ridos-welcome ../chroot/usr/bin/
             sudo chmod +x ../chroot/usr/bin/ridos-welcome
-            echo "✅ RIDOS-Welcome compiled and injected into chroot system"
-          else
-            echo "⚠️ Warning: ridos-welcome folder not found in repository root"
+            echo "✅ RIDOS-Welcome compiled and injected successfully"
           fi
 
-      - name: Install System Internal Scripts
+      - name: Final System Scripts Injection
         run: |
           sudo mkdir -p chroot/usr/share/ridos/
           sudo cp ridos-core/*.py chroot/usr/share/ridos/
           sudo cp legal/LICENSE.txt chroot/usr/share/ridos/
-          
-          # استدعاء سكربت توزيع الملفات الأساسي
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
-          - name: Build squashfs filesystem
+          - name: Create SquashFS and ISO Structure
         run: |
-          sudo mksquashfs chroot filesystem.squashfs \
-            -comp zstd \
-            -Xcompression-level 15 \
-            -e boot \
-            -noappend
+          # ضغط نظام الملفات بأعلى جودة ZSTD
+          sudo mksquashfs chroot filesystem.squashfs -comp zstd -Xcompression-level 15 -e boot -noappend
           
-          echo "Final SquashFS size: $(du -sh filesystem.squashfs | cut -f1)"
-
-      - name: Prepare ISO structure
-        run: |
-          mkdir -p iso/live
-          mkdir -p iso/boot/grub
-          
-          # Copy squashfs and kernel/initrd
+          # تجهيز هيكلية الـ ISO
+          mkdir -p iso/live iso/boot/grub
           cp filesystem.squashfs iso/live/
-          
-          # Dynamically find the latest kernel and initrd
           KERNEL=$(ls chroot/boot/vmlinuz-* | sort -V | tail -1)
           INITRD=$(ls chroot/boot/initrd.img-* | sort -V | tail -1)
-          
           cp "$KERNEL" iso/live/vmlinuz
           cp "$INITRD" iso/live/initrd
           
-          # Generate GRUB configuration
+          # توليد إعدادات GRUB
           python3 build-system/scripts/write-grub-config.py
 
-      - name: Build Final Bootable ISO
+      - name: Build Final Hybrid ISO
         run: |
-          # Generate GRUB core image for BIOS boot
-          grub-mkimage -O i386-pc -o bios.core.img -p "/boot/grub" \
-            iso9660 linux normal biosdisk search
-          
+          grub-mkimage -O i386-pc -o bios.core.img -p "/boot/grub" iso9660 linux normal biosdisk search
           cat /usr/lib/grub/i386-pc/cdboot.img bios.core.img > bios.img
           
-          # Assembly with xorriso (Hybrid ISO: BIOS + UEFI support)
           xorriso -as mkisofs \
-            -iso-level 3 \
-            -full-iso9660-filenames \
+            -iso-level 3 -full-iso9660-filenames \
             -volid "RIDOS_CORE_1.0" \
             -publisher "RIDOS-Core Project — alkinanireyad" \
             --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
-            -partition_offset 16 \
-            --mbr-force-bootable \
+            -partition_offset 16 --mbr-force-bootable \
             -o ridos-core-1.0-nova-x86_64.iso \
-            -b boot/grub/bios.img \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            --grub2-boot-info \
-            -graft-points \
-              "/boot/grub/bios.img=bios.img" \
-              "/=iso"
-
-          # Generate checksums for verification
-          md5sum    ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.md5
+            -b boot/grub/bios.img -no-emul-boot -boot-load-size 4 -boot-info-table \
+            --grub2-boot-info -graft-points "/=iso"
+          
+          # حساب قيم التحقق
+          md5sum ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.md5
           sha256sum ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.sha256
-          echo "ISO build process completed successfully."
 
-      - name: Upload ISO artifact
+      - name: Upload Finished ISO
         uses: actions/upload-artifact@v4
         with:
           name: RIDOS-Core-1.0-Nova
@@ -414,5 +288,4 @@ jobs:
             ridos-core-1.0-nova-x86_64.iso
             ridos-core-1.0-nova-x86_64.iso.md5
             ridos-core-1.0-nova-x86_64.iso.sha256
-          if-no-files-found: error
-          retention-days: 7
+            
