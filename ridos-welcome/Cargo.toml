@@ -1,0 +1,18 @@
+[package]
+name = "ridos-welcome"
+version = "1.0.0"
+edition = "2021"
+authors = ["alkinanireyad <alkinanireyad@github.com>"]
+description = "RIDOS-Core 1.0 Nova — Welcome Application"
+license = "GPL-3.0"
+
+[dependencies]
+gtk = { version = "0.7", package = "gtk4", features = ["v4_8"] }
+glib = "0.18"
+gio  = "0.18"
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+strip         = true
