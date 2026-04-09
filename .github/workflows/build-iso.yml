@@ -53,7 +53,8 @@ jobs:
             debootstrap squashfs-tools xorriso \
             grub-pc-bin grub-efi-amd64-bin grub2-common \
             mtools dosfstools gnupg2 curl wget \
-            imagemagick librsvg2-bin python3-pip
+            imagemagick librsvg2-bin python3-pip \
+            libgtk-4-dev pkg-config libadwaita-1-dev build-essential
           echo "Build dependencies ready"
 
       - name: Bootstrap Debian bookworm
@@ -369,15 +370,17 @@ jobs:
           sudo bash build-system/scripts/install-ridos-files.sh
 
       # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
-      - name: Build ridos-welcome (Rust + GTK4)
+      - name: Build RIDOS Welcome (Rust + GTK4)
         run: |
-          if [ -f "build-system/scripts/build-ridos-welcome.sh" ] && \
-             [ -f "ridos-welcome/Cargo.toml" ]; then
-            chmod +x build-system/scripts/build-ridos-welcome.sh
-            sudo bash build-system/scripts/build-ridos-welcome.sh
+          if [ -d "ridos-welcome" ]; then
+            cd ridos-welcome
+            cargo build --release
+            sudo mkdir -p ../chroot/usr/bin/
+            sudo cp target/release/ridos-welcome ../chroot/usr/bin/
+            sudo chmod +x ../chroot/usr/bin/ridos-welcome
+            echo "✅ RIDOS-Welcome compiled and injected"
           else
-            echo "WARNING: ridos-welcome source not found — skipping Rust build"
-            echo "Add ridos-welcome/Cargo.toml and ridos-welcome/src/main.rs to repo"
+            echo "⚠️ ridos-welcome directory not found"
           fi
 
       - name: Build squashfs filesystem
