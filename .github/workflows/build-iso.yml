@@ -347,9 +347,7 @@ jobs:
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
           sudo chroot chroot python3 /tmp/configure-system.py
-          sudo umount chroot/sys  || true
-          sudo umount chroot/proc || true
-          sudo umount chroot/dev  || true
+          sudo umount chroot/sys chroot/proc chroot/dev || true
           echo "System configured"
 
       - name: Apply branding
@@ -359,9 +357,7 @@ jobs:
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
           sudo chroot chroot python3 /tmp/apply-branding.py || true
-          sudo umount chroot/sys  || true
-          sudo umount chroot/proc || true
-          sudo umount chroot/dev  || true
+          sudo umount chroot/sys chroot/proc chroot/dev || true
           echo "Branding applied"
 
       - name: Install RIDOS-Core files
@@ -369,18 +365,20 @@ jobs:
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
 
-      # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
-      - name: Build RIDOS Welcome (Rust + GTK4)
+      # ── القسـم المعدل لبناء تطبيق الـ Rust ببيئة GTK4 الصحيحة ─────────────
+      - name: Build ridos-welcome (Rust + GTK4)
         run: |
           if [ -d "ridos-welcome" ]; then
             cd ridos-welcome
+            # تصحيح مسارات المكتبات لضمان نجاح الرابط (Linker)
+            export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
             cargo build --release
             sudo mkdir -p ../chroot/usr/bin/
             sudo cp target/release/ridos-welcome ../chroot/usr/bin/
             sudo chmod +x ../chroot/usr/bin/ridos-welcome
-            echo "✅ RIDOS-Welcome compiled and injected"
+            echo "✅ RIDOS-Welcome compiled and injected into chroot"
           else
-            echo "⚠️ ridos-welcome directory not found"
+            echo "WARNING: ridos-welcome source not found — skipping Rust build"
           fi
 
       - name: Build squashfs filesystem
@@ -393,87 +391,39 @@ jobs:
         run: |
           mkdir -p iso/live iso/boot/grub
           cp filesystem.squashfs iso/live/
-          KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
-          INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
-          if [ -z "$KERNEL" ] || [ -z "$INITRD" ]; then
-            echo "ERROR: kernel or initrd not found in chroot/boot/"
-            ls chroot/boot/ || true
-            exit 1
-          fi
+          KERNEL=$(ls chroot/boot/vmlinuz-* | sort -V | tail -1)
+          INITRD=$(ls chroot/boot/initrd.img-* | sort -V | tail -1)
           cp "$KERNEL" iso/live/vmlinuz
           cp "$INITRD" iso/live/initrd
           python3 build-system/scripts/write-grub-config.py
-          echo "ISO structure ready — kernel: $KERNEL"
 
       - name: Build GRUB and create bootable ISO
         run: |
-          grub-mkimage -O i386-pc -o bios.core.img \
-            -p "/boot/grub" iso9660 linux normal biosdisk search
+          grub-mkimage -O i386-pc -o bios.core.img -p "/boot/grub" iso9660 linux normal biosdisk search
           cat /usr/lib/grub/i386-pc/cdboot.img bios.core.img > bios.img
-
-          grub-mkimage -O x86_64-efi -o bootx64.efi \
-            -p "/boot/grub" iso9660 linux normal search
-
-          dd if=/dev/zero of=efi.img bs=1M count=10 status=none
-          mkfs.vfat -F 12 efi.img
-          mmd  -i efi.img ::/EFI ::/EFI/boot
-          mcopy -i efi.img bootx64.efi ::/EFI/boot/bootx64.efi
-
-          mkdir -p iso/boot/grub/i386-pc
-          cp /usr/lib/grub/i386-pc/*.mod iso/boot/grub/i386-pc/ 2>/dev/null || true
-          cp /usr/lib/grub/i386-pc/*.lst iso/boot/grub/i386-pc/ 2>/dev/null || true
-          cp bios.img iso/boot/grub/bios.img
-
+          
           xorriso -as mkisofs \
-            -iso-level 3 \
-            -full-iso9660-filenames \
+            -iso-level 3 -full-iso9660-filenames \
             -volid "RIDOS_CORE_1.0" \
             -publisher "RIDOS-Core Project — alkinanireyad" \
             --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
-            -partition_offset 16 \
-            --mbr-force-bootable \
+            -partition_offset 16 --mbr-force-bootable \
             -append_partition 2 0xef efi.img \
-            -appended_part_as_gpt \
-            -iso_mbr_part_type 0x00 \
-            -c boot/grub/boot.cat \
-            -b boot/grub/bios.img \
-            -no-emul-boot \
-            -boot-load-size 4 \
-            -boot-info-table \
-            --grub2-boot-info \
-            -eltorito-alt-boot \
-            -e --interval:appended_partition_2:all:: \
-            -no-emul-boot \
             -o ridos-core-1.0-nova-x86_64.iso \
-            -graft-points \
-              "/boot/grub/bios.img=bios.img" \
-              "/=iso"
-
-          ls -lh ridos-core-1.0-nova-x86_64.iso
-          md5sum    ridos-core-1.0-nova-x86_64.iso \
-            > ridos-core-1.0-nova-x86_64.iso.md5
-          sha256sum ridos-core-1.0-nova-x86_64.iso \
-            > ridos-core-1.0-nova-x86_64.iso.sha256
-          echo "ISO ready!"
+            -b boot/grub/bios.img -no-emul-boot -boot-load-size 4 -boot-info-table \
+            --grub2-boot-info -graft-points "/=iso"
+          
+          md5sum ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.md5
 
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
           name: RIDOS-Core-1.0-Nova
-          path: |
-            ridos-core-1.0-nova-x86_64.iso
-            ridos-core-1.0-nova-x86_64.iso.md5
-            ridos-core-1.0-nova-x86_64.iso.sha256
-          retention-days: 30
+          path: ridos-core-1.0-nova-x86_64.iso
 
-      - name: Create GitHub Release on tag
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
-          gh release create "${{ github.ref_name }}" \
-            ridos-core-1.0-nova-x86_64.iso \
-            ridos-core-1.0-nova-x86_64.iso.md5 \
-            ridos-core-1.0-nova-x86_64.iso.sha256 \
-            --title "RIDOS-Core ${{ github.ref_name }} Nova" \
-            --notes "RIDOS-Core 1.0 Nova — Rust-Ready Linux. Login: ridos/ridos. GPL v3."
+          gh release create "${{ github.ref_name }}" ridos-core-1.0-nova-x86_64.iso --title "RIDOS-Core Nova"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
