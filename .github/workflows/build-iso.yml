@@ -368,6 +368,18 @@ jobs:
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
 
+      # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
+      - name: Build ridos-welcome (Rust + GTK4)
+        run: |
+          if [ -f "build-system/scripts/build-ridos-welcome.sh" ] && \
+             [ -f "ridos-welcome/Cargo.toml" ]; then
+            chmod +x build-system/scripts/build-ridos-welcome.sh
+            sudo bash build-system/scripts/build-ridos-welcome.sh
+          else
+            echo "WARNING: ridos-welcome source not found — skipping Rust build"
+            echo "Add ridos-welcome/Cargo.toml and ridos-welcome/src/main.rs to repo"
+          fi
+
       - name: Build squashfs filesystem
         run: |
           sudo mksquashfs chroot filesystem.squashfs \
