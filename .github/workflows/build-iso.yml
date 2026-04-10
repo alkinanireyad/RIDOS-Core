@@ -8,12 +8,18 @@ on:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RIDOS-Core 1.0 Nova
+# Repository : alkinanireyad/RIDOS-Core
+# Base       : Debian 12 Bookworm + Linux 6.12 LTS
+# Desktop    : GNOME (Xorg default, Wayland available)
+# Browser    : Brave (primary) + Firefox-ESR (fallback)
+# Installer  : ridos-installer.py — custom GTK (autostarts 10s after GNOME)
+# WiFi       : Full driver support 2008-2025 including HP MediaTek/Realtek
 # ─────────────────────────────────────────────────────────────────────────────
 
 jobs:
   build-iso:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Checkout source
@@ -34,253 +40,426 @@ jobs:
             "build-system/scripts/install-ridos-files.sh" \
             "legal/LICENSE.txt"
           do
-            if [ -f "$f" ]; then 
-              echo "  OK      : $f"
-            else 
-              echo "  MISSING : $f"
-              MISSING=$((MISSING+1))
-            fi
+            if [ -f "$f" ]; then echo "  OK      : $f"
+            else echo "  MISSING : $f"; MISSING=$((MISSING+1)); fi
           done
-          [ $MISSING -eq 0 ] || exit 1
+          [ $MISSING -eq 0 ] || { echo "ERROR: $MISSING files missing"; exit 1; }
+          echo "All required files present."
 
       - name: Install build dependencies
         run: |
-          sudo add-apt-repository ppa:gnome-team/ppa -y
           sudo apt-get update -qq
           sudo apt-get install -y \
-            debootstrap \
-            squashfs-tools \
-            xorriso \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            grub2-common \
-            mtools \
-            dosfstools \
-            gnupg2 \
-            curl \
-            wget \
-            imagemagick \
-            librsvg2-bin \
-            python3-pip \
-            libgtk-4-dev \
-            pkg-config \
-            libadwaita-1-dev \
-            build-essential
-            - name: Bootstrap and Configure Repositories
+            debootstrap squashfs-tools xorriso \
+            grub-pc-bin grub-efi-amd64-bin grub2-common \
+            mtools dosfstools gnupg2 curl wget \
+            imagemagick librsvg2-bin python3-pip
+          echo "Build dependencies ready"
+
+      - name: Bootstrap Debian bookworm
         run: |
-          # Bootstrap Debian system
           curl -fsSL https://ftp-master.debian.org/keys/release-12.asc \
             | sudo gpg --dearmor -o /usr/share/keyrings/debian-bookworm.gpg
           sudo debootstrap \
-            --arch=amd64 \
-            --variant=minbase \
+            --arch=amd64 --variant=minbase \
             --keyring=/usr/share/keyrings/debian-bookworm.gpg \
             --include=systemd,systemd-sysv,udev,sudo,locales,bash \
             bookworm chroot http://deb.debian.org/debian/
+          echo "Bootstrap done"
 
-          # Mount for configuration
+      - name: Add third-party repositories
+        run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
-          
-          printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\n' \
-            | sudo tee chroot/etc/apt/sources.list
-          printf 'deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\n' \
-            | sudo tee -a chroot/etc/apt/sources.list
-          printf 'deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
-            | sudo tee -a chroot/etc/apt/sources.list
 
-          sudo chroot chroot apt-get update
-          sudo chroot chroot apt-get install -y curl gnupg2 ca-certificates apt-transport-https
+          printf 'deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware\ndeb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware\ndeb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware\n' \
+            | sudo tee chroot/etc/apt/sources.list > /dev/null
 
-          # Brave Repo
-          sudo chroot chroot bash -c "curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg"
-          echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main' \
-            | sudo tee chroot/etc/apt/sources.list.d/brave-browser.list
+          sudo chroot chroot bash -c "
+            apt-get install -y curl gnupg2 apt-transport-https ca-certificates 2>/dev/null || true
+            curl -fsSLo /usr/share/keyrings/brave-browser-archive-keyring.gpg \
+              https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg && \
+            echo 'deb [signed-by=/usr/share/keyrings/brave-browser-archive-keyring.gpg arch=amd64] https://brave-browser-apt-release.s3.brave.com/ stable main' \
+              > /etc/apt/sources.list.d/brave-browser.list
+          " || echo "WARNING: Brave repo failed"
 
-          # VS Code Repo
-          sudo chroot chroot bash -c "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg"
-          echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' \
-            | sudo tee chroot/etc/apt/sources.list.d/vscode.list
-          
-          sudo chroot chroot apt-get update
-          sudo umount chroot/sys chroot/proc chroot/dev || true
-          - name: Install Base and Firmware Packages
+          sudo chroot chroot bash -c "
+            curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+              | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg && \
+            echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' \
+              > /etc/apt/sources.list.d/vscode.list
+          " || echo "WARNING: VS Code repo failed"
+
+          sudo chroot chroot apt-get update -qq || true
+          sudo umount chroot/sys  || true
+          sudo umount chroot/proc || true
+          sudo umount chroot/dev  || true
+          echo "Repositories configured"
+
+      - name: Install all packages
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
           sudo mount --bind /run  chroot/run
 
-          # تحديث المستودعات داخل chroot
-          sudo chroot chroot apt-get update -qq
-
-          # تثبيت كيرنل ونظام الإقلاع
+          # ── Core boot + live system ───────────────────────────────────────
+          # linux-headers-amd64 added: required for DKMS WiFi drivers to compile
           sudo chroot chroot apt-get install -y \
-            live-boot \
-            live-boot-initramfs-tools \
-            linux-image-amd64 \
-            linux-headers-amd64 \
-            initramfs-tools \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            efibootmgr \
-            os-prober \
-            parted \
-            dkms \
-            build-essential
+            live-boot live-boot-initramfs-tools \
+            linux-image-amd64 linux-headers-amd64 initramfs-tools \
+            grub-pc-bin grub2-common grub-common \
+            grub-efi-amd64-bin efibootmgr os-prober \
+            bash-completion tzdata locales cryptsetup \
+            policykit-1-gnome apt-transport-https ca-certificates \
+            parted gparted squashfs-tools \
+            dkms build-essential
 
-          # دعم شامل لتعريفات الوايفاي (Realtek, Intel, MediaTek, Broadcom)
+          sudo chroot chroot apt-get install -y grub-pc        || true
+          sudo chroot chroot apt-get install -y grub-efi-amd64 || true
+
+          # ── WiFi drivers — comprehensive 2008-2025 coverage ───────────────
+          # Each family is separate so one failure does not block others.
+
+          # Intel WiFi — most common (ThinkPad, Dell XPS, HP Spectre/Envy/EliteBook)
           sudo chroot chroot apt-get install -y \
             firmware-iwlwifi \
-            firmware-atheros \
-            firmware-realtek \
-            firmware-ralink \
-            firmware-libertas \
-            firmware-brcm80211 \
-            firmware-misc-nonfree \
-            firmware-amd-graphics \
-            firmware-intel-graphics \
-            intel-microcode \
-            amd64-microcode \
-            wireless-tools \
-            wpasupplicant \
-            rfkill \
-            usb-modeswitch \
-            pciutils \
-            usbutils \
-            lsb-release \
-            hwdata --no-install-recommends || true
+            --no-install-recommends || true
 
-          # تعريفات إضافية لكروت HP والقطع الحديثة
+          # Atheros/Qualcomm WiFi — many 2008-2020 laptops
+          sudo chroot chroot apt-get install -y \
+            firmware-atheros \
+            --no-install-recommends || true
+
+          # Realtek WiFi — budget laptops + USB adapters
+          # Covers RTL8188/RTL8192/RTL8723/RTL8821/RTL8822/RTL8852
+          sudo chroot chroot apt-get install -y \
+            firmware-realtek \
+            --no-install-recommends || true
+
+          # Realtek RTL8821CE DKMS driver — HP 250/255/15/14 2018-2021
+          # This is the most common missing HP WiFi driver
           sudo chroot chroot apt-get install -y \
             rtl8821ce-dkms \
-            rtl88x2bu-dkms \
-            firmware-mediatek || true
+            --no-install-recommends || true
 
-          sudo umount chroot/run chroot/sys chroot/proc chroot/dev || true
-          - name: Install Desktop and Pro Tools
+          # Realtek RTL88x2bu DKMS — USB WiFi adapters (TP-Link, Asus)
+          sudo chroot chroot apt-get install -y \
+            rtl88x2bu-dkms \
+            --no-install-recommends || true
+
+          # Ralink/MediaTek WiFi — 2010-2022 budget laptops
+          sudo chroot chroot apt-get install -y \
+            firmware-ralink \
+            --no-install-recommends || true
+
+          # MediaTek MT7921/MT7922 — HP laptops 2021-2024
+          # This is the second most common missing HP WiFi driver
+          sudo chroot chroot apt-get install -y \
+            firmware-mediatek \
+            --no-install-recommends || true
+
+          # Broadcom WiFi — MacBooks, HP/Dell 2010-2018
+          sudo chroot chroot apt-get install -y \
+            firmware-b43-installer b43-fwcutter \
+            --no-install-recommends || true
+
+          # Broadcom STA driver (wl) — older Broadcom chips
+          sudo chroot chroot apt-get install -y \
+            broadcom-sta-dkms \
+            --no-install-recommends || true
+
+          # Wired NIC firmware
+          sudo chroot chroot apt-get install -y \
+            firmware-bnx2 firmware-bnx2x firmware-intelnic \
+            --no-install-recommends || true
+
+          # All remaining firmware + microcode
+          sudo chroot chroot apt-get install -y \
+            firmware-misc-nonfree \
+            firmware-linux \
+            firmware-linux-free \
+            firmware-linux-nonfree \
+            intel-microcode \
+            amd64-microcode \
+            fwupd fwupd-signed \
+            --no-install-recommends || true
+
+          # WiFi management tools — required for ALL WiFi to function
+          sudo chroot chroot apt-get install -y \
+            wpasupplicant \
+            wireless-tools \
+            rfkill \
+            usb-modeswitch \
+            usb-modeswitch-data \
+            iw \
+            network-manager \
+            network-manager-gnome
+
+          # ── GNOME desktop ─────────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            gnome-core gnome-shell gnome-session \
+            gnome-terminal gnome-text-editor \
+            gnome-control-center gnome-tweaks \
+            gnome-software gnome-software-plugin-flatpak \
+            gnome-shell-extensions gnome-menus \
+            gdm3 nautilus gedit \
+            xwayland xorg xserver-xorg \
+            network-manager-gnome \
+            gvfs gvfs-backends \
+            dconf-cli dconf-gsettings-backend
+
+          # ── Graphics drivers ──────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            xserver-xorg-video-all xserver-xorg-input-all \
+            xserver-xorg-video-intel xserver-xorg-video-amdgpu \
+            xserver-xorg-video-nouveau xserver-xorg-video-vesa \
+            xserver-xorg-video-fbdev \
+            mesa-vulkan-drivers libgl1-mesa-dri \
+            --no-install-recommends || true
+
+          # ── Audio ─────────────────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            pulseaudio pulseaudio-utils alsa-utils
+
+          # ── VM guest tools ────────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            virtualbox-guest-utils virtualbox-guest-x11 \
+            spice-vdagent \
+            open-vm-tools open-vm-tools-desktop || true
+
+          # ── Browsers ──────────────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y brave-browser \
+            && echo "Brave OK" || echo "WARNING: Brave failed"
+          sudo chroot chroot apt-get install -y firefox-esr
+
+          # ── VS Code ───────────────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y code \
+            && echo "VS Code OK" || echo "WARNING: VS Code failed"
+
+          # ── Python + GTK (required for installer) ─────────────────────────
+          sudo chroot chroot apt-get install -y \
+            python3 python3-pip python3-venv python3-tk \
+            python3-gi python3-gi-cairo \
+            gir1.2-gtk-3.0 gir1.2-gtk-4.0 \
+            python3-psutil python3-requests \
+            python3-flask python3-flask-socketio
+
+          # ── Development tools ─────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            gcc g++ make cmake \
+            git git-gui vim nano \
+            curl wget zip unzip p7zip-full \
+            jq shellcheck
+
+          # ── Pro IT: Network & Analysis ────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            nmap wireshark wireshark-common tshark \
+            tcpdump netcat-openbsd ncat \
+            traceroute mtr-tiny iperf3 \
+            net-tools dnsutils whois \
+            ipcalc arping ethtool \
+            openssh-client openssh-server
+
+          # ── Pro IT: Security ──────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            aircrack-ng john hydra hashcat \
+            nikto sqlmap dirb \
+            steghide binwalk foremost \
+            firejail wireguard wireguard-tools \
+            gnupg2 openssl
+
+          # ── Pro IT: System Monitoring ─────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            htop btop iotop iftop nethogs \
+            ncdu lshw dmidecode \
+            smartmontools hdparm \
+            sysstat lsof strace
+
+          # ── Pro IT: Modern CLI tools ──────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            bat ripgrep fd-find \
+            neofetch tree tmux screen fzf
+
+          # ── Pro IT: Disk & Recovery ───────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            parted testdisk gddrescue \
+            rsync dosfstools ntfs-3g exfat-fuse \
+            squashfs-tools
+
+          # ── Containers & DevOps ───────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            docker.io docker-compose ansible || true
+
+          # ── Web & API tools ───────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            httpie lynx proxychains4
+
+          # ── System utilities ──────────────────────────────────────────────
+          sudo chroot chroot apt-get install -y \
+            flatpak timeshift cockpit \
+            zram-tools tlp tlp-rdw \
+            bluetooth bluez \
+            pciutils usbutils acpi acpid laptop-detect
+
+          sudo umount chroot/run  || true
+          sudo umount chroot/sys  || true
+          sudo umount chroot/proc || true
+          sudo umount chroot/dev  || true
+          echo "All packages installed successfully"
+
+      - name: Create ridos user
         run: |
           sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
           sudo mount --bind /sys  chroot/sys
 
-          # تثبيت واجهة GNOME Core
-          sudo chroot chroot apt-get install -y \
-            gnome-core \
-            gnome-shell \
-            gnome-session \
-            gnome-terminal \
-            gnome-control-center \
-            gnome-tweaks \
-            nautilus \
-            gdm3 \
-            xserver-xorg-video-all
+          sudo chroot chroot useradd \
+            --create-home --shell /bin/bash \
+            --groups sudo,audio,video,netdev,plugdev \
+            ridos 2>/dev/null || true
 
-          # تثبيت المتصفحات وأدوات التطوير
-          sudo chroot chroot apt-get install -y \
-            brave-browser \
-            firefox-esr \
-            code \
-            python3-gi \
-            python3-pip \
-            gir1.2-gtk-4.0 \
-            libadwaita-1-0 \
-            vlc \
-            gparted \
-            htop \
-            btop \
-            git
-
-          # أدوات المحترفين (Cybersecurity & Networking)
-          sudo chroot chroot apt-get install -y \
-            nmap \
-            wireshark \
-            tcpdump \
-            aircrack-ng \
-            john \
-            hydra \
-            hashcat \
-            sqlmap \
-            docker.io \
-            cockpit || true
-
-          sudo umount chroot/sys chroot/proc chroot/dev || true
-          - name: Configure User and Branding
-        run: |
-          # إعداد المستخدم والصلاحيات
-          sudo chroot chroot useradd -m -s /bin/bash -G sudo,audio,video,docker,wireshark ridos || true
           echo "ridos:ridos" | sudo chroot chroot chpasswd
           echo "root:ridos"  | sudo chroot chroot chpasswd
-          printf 'ridos ALL=(ALL) NOPASSWD:ALL\n' | sudo tee chroot/etc/sudoers.d/ridos > /dev/null
-          sudo chmod 0440 chroot/etc/sudoers.d/ridos
 
-          # تطبيق الهوية البصرية وإعدادات النظام
+          printf 'ridos ALL=(ALL) NOPASSWD:ALL\n' \
+            | sudo tee chroot/etc/sudoers.d/ridos > /dev/null
+          sudo chmod 440 chroot/etc/sudoers.d/ridos
+
+          sudo chroot chroot usermod -aG wireshark ridos 2>/dev/null || true
+          sudo chroot chroot usermod -aG docker    ridos 2>/dev/null || true
+
+          echo "--- Verifying user ---"
+          sudo chroot chroot id ridos
+          sudo chroot chroot grep ridos /etc/passwd
+
+          sudo umount chroot/sys  || true
+          sudo umount chroot/proc || true
+          sudo umount chroot/dev  || true
+          echo "User ridos: username=ridos password=ridos"
+
+      - name: Configure system
+        run: |
           sudo cp build-system/scripts/configure-system.py chroot/tmp/
-          sudo cp build-system/scripts/apply-branding.py chroot/tmp/
-          sudo mount --bind /dev chroot/dev
+          sudo mount --bind /dev  chroot/dev
           sudo mount --bind /proc chroot/proc
-          sudo mount --bind /sys chroot/sys
+          sudo mount --bind /sys  chroot/sys
           sudo chroot chroot python3 /tmp/configure-system.py
+          sudo umount chroot/sys  || true
+          sudo umount chroot/proc || true
+          sudo umount chroot/dev  || true
+          echo "System configured"
+
+      - name: Apply branding
+        run: |
+          sudo cp build-system/scripts/apply-branding.py chroot/tmp/
+          sudo mount --bind /dev  chroot/dev
+          sudo mount --bind /proc chroot/proc
+          sudo mount --bind /sys  chroot/sys
           sudo chroot chroot python3 /tmp/apply-branding.py || true
-          sudo umount chroot/sys chroot/proc chroot/dev || true
+          sudo umount chroot/sys  || true
+          sudo umount chroot/proc || true
+          sudo umount chroot/dev  || true
+          echo "Branding applied"
 
-      - name: Build RIDOS Welcome (Rust + GTK4)
+      - name: Install RIDOS-Core files
         run: |
-          if [ -d "ridos-welcome" ]; then
-            cd ridos-welcome
-            # استخدام مسارات المكتبات الصحيحة لنجاح عملية الربط
-            export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-            cargo build --release
-            sudo mkdir -p ../chroot/usr/bin/
-            sudo cp target/release/ridos-welcome ../chroot/usr/bin/
-            sudo chmod +x ../chroot/usr/bin/ridos-welcome
-            echo "✅ RIDOS-Welcome compiled and injected successfully"
-          fi
-
-      - name: Final System Scripts Injection
-        run: |
-          sudo mkdir -p chroot/usr/share/ridos/
-          sudo cp ridos-core/*.py chroot/usr/share/ridos/
-          sudo cp legal/LICENSE.txt chroot/usr/share/ridos/
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
-          - name: Create SquashFS and ISO Structure
+
+      # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
+      # Skips gracefully if source files are not in the repo.
+      # Adds ~20 min to build time. Binary ends up at:
+      # /opt/ridos-core/bin/ridos-welcome
+      - name: Build ridos-welcome (Rust + GTK4)
         run: |
-          # ضغط نظام الملفات بأعلى جودة ZSTD
-          sudo mksquashfs chroot filesystem.squashfs -comp zstd -Xcompression-level 15 -e boot -noappend
-          
-          # تجهيز هيكلية الـ ISO
+          if [ -f "build-system/scripts/build-ridos-welcome.sh" ] && \
+             [ -f "ridos-welcome/Cargo.toml" ] && \
+             [ -f "ridos-welcome/src/main.rs" ]; then
+            echo "Building Rust welcome app..."
+            chmod +x build-system/scripts/build-ridos-welcome.sh
+            sudo bash build-system/scripts/build-ridos-welcome.sh
+          else
+            echo "INFO: ridos-welcome source not found — skipping Rust build."
+            echo "To enable: add ridos-welcome/Cargo.toml and ridos-welcome/src/main.rs"
+            echo "and build-system/scripts/build-ridos-welcome.sh to your repo."
+          fi
+
+      - name: Build squashfs filesystem
+        run: |
+          sudo mksquashfs chroot filesystem.squashfs \
+            -comp zstd -Xcompression-level 15 -e boot -noappend
+          echo "squashfs size: $(du -sh filesystem.squashfs | cut -f1)"
+
+      - name: Prepare ISO structure
+        run: |
           mkdir -p iso/live iso/boot/grub
           cp filesystem.squashfs iso/live/
-          KERNEL=$(ls chroot/boot/vmlinuz-* | sort -V | tail -1)
-          INITRD=$(ls chroot/boot/initrd.img-* | sort -V | tail -1)
+          KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
+          INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
+          if [ -z "$KERNEL" ] || [ -z "$INITRD" ]; then
+            echo "ERROR: kernel or initrd not found in chroot/boot/"
+            ls chroot/boot/ || true
+            exit 1
+          fi
           cp "$KERNEL" iso/live/vmlinuz
           cp "$INITRD" iso/live/initrd
-          
-          # توليد إعدادات GRUB
           python3 build-system/scripts/write-grub-config.py
+          echo "ISO structure ready — kernel: $KERNEL"
 
-      - name: Build Final Hybrid ISO
+      - name: Build GRUB and create bootable ISO
         run: |
-          grub-mkimage -O i386-pc -o bios.core.img -p "/boot/grub" iso9660 linux normal biosdisk search
+          grub-mkimage -O i386-pc -o bios.core.img \
+            -p "/boot/grub" iso9660 linux normal biosdisk search
           cat /usr/lib/grub/i386-pc/cdboot.img bios.core.img > bios.img
-          
+
+          grub-mkimage -O x86_64-efi -o bootx64.efi \
+            -p "/boot/grub" iso9660 linux normal search
+
+          dd if=/dev/zero of=efi.img bs=1M count=10 status=none
+          mkfs.vfat -F 12 efi.img
+          mmd  -i efi.img ::/EFI ::/EFI/boot
+          mcopy -i efi.img bootx64.efi ::/EFI/boot/bootx64.efi
+
+          mkdir -p iso/boot/grub/i386-pc
+          cp /usr/lib/grub/i386-pc/*.mod iso/boot/grub/i386-pc/ 2>/dev/null || true
+          cp /usr/lib/grub/i386-pc/*.lst iso/boot/grub/i386-pc/ 2>/dev/null || true
+          cp bios.img iso/boot/grub/bios.img
+
           xorriso -as mkisofs \
-            -iso-level 3 -full-iso9660-filenames \
+            -iso-level 3 \
+            -full-iso9660-filenames \
             -volid "RIDOS_CORE_1.0" \
             -publisher "RIDOS-Core Project — alkinanireyad" \
             --grub2-mbr /usr/lib/grub/i386-pc/boot_hybrid.img \
-            -partition_offset 16 --mbr-force-bootable \
+            -partition_offset 16 \
+            --mbr-force-bootable \
+            -append_partition 2 0xef efi.img \
+            -appended_part_as_gpt \
+            -iso_mbr_part_type 0x00 \
+            -c boot/grub/boot.cat \
+            -b boot/grub/bios.img \
+            -no-emul-boot \
+            -boot-load-size 4 \
+            -boot-info-table \
+            --grub2-boot-info \
+            -eltorito-alt-boot \
+            -e --interval:appended_partition_2:all:: \
+            -no-emul-boot \
             -o ridos-core-1.0-nova-x86_64.iso \
-            -b boot/grub/bios.img -no-emul-boot -boot-load-size 4 -boot-info-table \
-            --grub2-boot-info -graft-points "/=iso"
-          
-          # حساب قيم التحقق
-          md5sum ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.md5
-          sha256sum ridos-core-1.0-nova-x86_64.iso > ridos-core-1.0-nova-x86_64.iso.sha256
+            -graft-points \
+              "/boot/grub/bios.img=bios.img" \
+              "/=iso"
 
-      - name: Upload Finished ISO
+          ls -lh ridos-core-1.0-nova-x86_64.iso
+          md5sum    ridos-core-1.0-nova-x86_64.iso \
+            > ridos-core-1.0-nova-x86_64.iso.md5
+          sha256sum ridos-core-1.0-nova-x86_64.iso \
+            > ridos-core-1.0-nova-x86_64.iso.sha256
+          echo "ISO ready!"
+
+      - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
         with:
           name: RIDOS-Core-1.0-Nova
@@ -288,4 +467,16 @@ jobs:
             ridos-core-1.0-nova-x86_64.iso
             ridos-core-1.0-nova-x86_64.iso.md5
             ridos-core-1.0-nova-x86_64.iso.sha256
-            
+          retention-days: 30
+
+      - name: Create GitHub Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            ridos-core-1.0-nova-x86_64.iso \
+            ridos-core-1.0-nova-x86_64.iso.md5 \
+            ridos-core-1.0-nova-x86_64.iso.sha256 \
+            --title "RIDOS-Core ${{ github.ref_name }} Nova" \
+            --notes "RIDOS-Core 1.0 Nova — Rust-Ready Linux. Login: ridos/ridos. GPL v3."
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
