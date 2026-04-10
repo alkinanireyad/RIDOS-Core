@@ -50,23 +50,23 @@ chmod +x chroot/usr/local/bin/ridos-help
 
 # ── Install GNOME desktop-icons extension (needs mounts) ─────────────────────
 echo "Installing GNOME desktop icons extension..."
-mount --bind /dev  chroot/dev
-mount --bind /proc chroot/proc
-mount --bind /sys  chroot/sys
+sudo mount --bind /dev  chroot/dev
+sudo mount --bind /proc chroot/proc
+sudo mount --bind /sys  chroot/sys
 
-chroot chroot apt-get install -y gnome-shell-extension-desktop-icons 2>/dev/null \
-  || chroot chroot apt-get install -y gnome-shell-extension-desktop-icons-ng 2>/dev/null \
+sudo chroot chroot apt-get install -y gnome-shell-extension-desktop-icons 2>/dev/null \
+  || sudo chroot chroot apt-get install -y gnome-shell-extension-desktop-icons-ng 2>/dev/null \
   || echo "WARNING: desktop-icons extension not found in repos"
 
 # Also install GNOME tweaks for user to manage extensions
-chroot chroot apt-get install -y gnome-tweaks 2>/dev/null || true
+sudo chroot chroot apt-get install -y gnome-tweaks 2>/dev/null || true
 
 # Compile glib schemas
-chroot chroot glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
+sudo chroot chroot glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
 
-umount chroot/sys  || true
-umount chroot/proc || true
-umount chroot/dev  || true
+sudo umount chroot/sys  || true
+sudo umount chroot/proc || true
+sudo umount chroot/dev  || true
 
 # ── GNOME system-wide dconf defaults ─────────────────────────────────────────
 # Sets desktop icons on, enables extensions, sets dock favorites
@@ -127,6 +127,22 @@ AUTOSTART
 # Remove the user-level duplicate that was causing two popups
 rm -f chroot/home/ridos/.config/autostart/ridos-installer.desktop
 
+# ── Autostart ridos-welcome (Rust/GTK4 app) after login ──────────────────────
+# Runs 5s after login — before installer so user sees welcome first
+cat > chroot/etc/xdg/autostart/ridos-welcome.desktop << 'AUTOSTART'
+[Desktop Entry]
+Type=Application
+Name=RIDOS-Core Welcome
+Comment=Welcome to RIDOS-Core — install optional tools
+Exec=bash -c "sleep 5 && /opt/ridos-core/bin/ridos-welcome"
+Icon=system-software-install
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+StartupNotify=false
+NotShowIn=KDE;
+AUTOSTART
+
 # ── Desktop shortcuts ─────────────────────────────────────────────────────────
 cat > chroot/home/ridos/Desktop/install-ridos-core.desktop << 'DESK'
 [Desktop Entry]
@@ -166,18 +182,6 @@ Terminal=false
 Categories=System;
 DESK
 
-cat > chroot/home/ridos/Desktop/ridos-welcome.desktop << 'DESK'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Optional Tools
-Comment=Install optional tools for RIDOS-Core
-Exec=gnome-terminal -- bash -c "python3 /opt/ridos-core/bin/welcome-app.py; exec bash"
-Icon=preferences-system
-Terminal=false
-Categories=System;
-DESK
-
 cat > chroot/home/ridos/Desktop/ridos-help.desktop << 'DESK'
 [Desktop Entry]
 Version=1.0
@@ -186,6 +190,20 @@ Name=RIDOS-Core Help
 Comment=Help for beginners and pro users
 Exec=gnome-terminal -- bash -c "ridos-help; exec bash"
 Icon=help-browser
+Terminal=false
+Categories=System;
+DESK
+
+# RIDOS-Core Welcome — launches the Rust/GTK4 binary
+# Falls back to welcome-app.py if binary not yet compiled
+cat > chroot/home/ridos/Desktop/ridos-welcome.desktop << 'DESK'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=RIDOS-Core Welcome
+Comment=System info, optional tools, about and HDD installer
+Exec=bash -c "/opt/ridos-core/bin/ridos-welcome 2>/dev/null || python3 /opt/ridos-core/bin/welcome-app.py"
+Icon=system-software-install
 Terminal=false
 Categories=System;
 DESK
