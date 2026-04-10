@@ -43,11 +43,10 @@ echo "Installing GTK4 dev libraries..."
 chroot chroot apt-get install -y \
     libgtk-4-dev \
     libglib2.0-dev \
-    pkg-config \
+    pkgconf \
     gcc \
     ca-certificates \
     curl \
-    2>/dev/null
 
 # ── Install Rust via rustup ───────────────────────────────────────────────────
 echo "Installing Rust toolchain via rustup..."
