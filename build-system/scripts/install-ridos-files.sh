@@ -106,34 +106,20 @@ trash-icon-visible=true
 SCHEMA
 chroot chroot glib-compile-schemas /usr/share/glib-2.0/schemas/ 2>/dev/null || true
 
-# ── Autostart installer ───────────────────────────────────────────────────────
-# FIX: Write to ONLY /etc/xdg/autostart — NOT to ~/.config/autostart
-# Writing to both caused TWO popups. System autostart is sufficient.
-cat > chroot/etc/xdg/autostart/ridos-installer.desktop << 'AUTOSTART'
-[Desktop Entry]
-Type=Application
-Name=Install RIDOS-Core
-GenericName=System Installer
-Comment=Install RIDOS-Core 1.0 Nova to your hard drive
-Exec=bash -c "sleep 10 && gnome-terminal --title=RIDOS-Installer -- bash -c 'sudo python3 /opt/ridos-core/bin/ridos-installer.py; exec bash'"
-Icon=system-software-install
-Terminal=false
-X-GNOME-Autostart-enabled=true
-X-GNOME-Autostart-Delay=10
-StartupNotify=false
-NotShowIn=KDE;
-AUTOSTART
+# ── Autostart: ridos-welcome ONLY ────────────────────────────────────────────
+# The welcome app autostarts 5s after login.
+# It has an "Install to HDD" tab — no separate installer popup needed.
+# Installer is still launchable from the desktop shortcut.
 
-# Remove the user-level duplicate that was causing two popups
+# Remove old installer autostart if it exists from a previous build
+rm -f chroot/etc/xdg/autostart/ridos-installer.desktop
 rm -f chroot/home/ridos/.config/autostart/ridos-installer.desktop
 
-# ── Autostart ridos-welcome (Rust/GTK4 app) after login ──────────────────────
-# Runs 5s after login — before installer so user sees welcome first
 cat > chroot/etc/xdg/autostart/ridos-welcome.desktop << 'AUTOSTART'
 [Desktop Entry]
 Type=Application
 Name=RIDOS-Core Welcome
-Comment=Welcome to RIDOS-Core — install optional tools
+Comment=Welcome to RIDOS-Core 1.0 Nova
 Exec=bash -c "sleep 5 && /opt/ridos-core/bin/ridos-welcome"
 Icon=system-software-install
 Terminal=false
