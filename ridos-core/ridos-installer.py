@@ -1,19 +1,47 @@
 #!/usr/bin/env python3
 """
 ridos-installer.py — RIDOS-Core 1.0 Nova
-Correct installation sequence — no infinite rsync recursion.
+Final version with all fixes applied:
 
-Key fixes vs previous versions:
-1. rsync excludes /mnt/ridos_target specifically (not just /mnt/*)
-2. partprobe + udevadm settle + sleep before mkfs
-3. mkfs.ext4 with lazy_itable_init=0
-4. rsync BEFORE bind mounts
-5. GRUB installed inside chroot via apt
+GRUB fixes:
+  - --boot-directory added so GRUB writes to correct location
+  - Automatic fallback to live-system grub-install if chroot fails
+  - If update-grub fails → writes minimal grub.cfg manually
+  - All bind mounts logged so failures are visible
+
+Disk Manager (8 buttons):
+  + EXT4 / + Swap / Set Boot / Set Active /
+  Resize / Format / Delete / Mount
+
+Resize:
+  - Asks for new size in GB via dialog
+  - Runs e2fsck → parted resizepart → resize2fs for EXT4
+  - Supports XFS (xfs_growfs)
+  - Checks if mounted before resizing
+
+Boot/Active flags:
+  - Set Boot  → parted set N boot on
+  - Set Active → parted set N esp on (UEFI) or sfdisk --activate (BIOS)
+  - During install: EFI gets esp+boot, root gets boot automatically
+
+Installation sequence (proven):
+  1. Clean mounts
+  2. GPT/MBR partition with correct flags
+  3. partprobe + udevadm settle + sleep (kernel registration)
+  4. Format (lazy_itable_init=0)
+  5. Mount
+  6. rsync with --exclude=EXACT_MOUNT_PATH (no recursion)
+  7. Bind mounts AFTER rsync
+  8. Configure inside chroot
+  9. GRUB inside chroot with fallback
+ 10. update-grub with manual fallback
+ 11. Remove live packages
+ 12. Lazy unmount
 """
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GLib
-import os, sys, subprocess, threading, re
+import os, sys, subprocess, threading, re, json
 
 VERSION  = "RIDOS-Core 1.0 Nova"
 MOUNT_PT = "/mnt/ridos_target"
@@ -45,41 +73,68 @@ def sh_log(cmd, log_fn, timeout=3600):
         GLib.idle_add(log_fn, f'ERROR: {e}')
         return 1
 
-# ── Disk detection ────────────────────────────────────────────────────────────
+# ── Disk / partition helpers ──────────────────────────────────────────────────
 def get_disks():
     disks = []
     out, _, rc = sh('lsblk -J -b -o NAME,SIZE,TYPE,MODEL 2>/dev/null')
     if rc == 0:
         try:
-            import json
             for d in json.loads(out).get('blockdevices', []):
                 if d.get('type') == 'disk':
                     name  = d['name']
                     model = (d.get('model') or '').strip() or name
                     gb    = round(int(d.get('size') or 0) / 1024**3, 1)
-                    disks.append((f'/dev/{name}',
-                                  f'{model}  [{gb} GB]', gb))
+                    disks.append((f'/dev/{name}', f'{model}  [{gb} GB]', gb))
             if disks:
                 return disks
         except Exception:
             pass
-    # Fallback: /proc/partitions
     out, _, _ = sh('cat /proc/partitions 2>/dev/null')
     for line in out.splitlines()[2:]:
         p = line.split()
         if len(p) == 4:
             name = p[3]
-            if re.match(
-                    r'^(sd[a-z]|vd[a-z]|nvme\d+n\d+|hd[a-z])$',
-                    name):
+            if re.match(r'^(sd[a-z]|vd[a-z]|nvme\d+n\d+|hd[a-z])$', name):
                 gb = round(int(p[2]) / 1024**2, 1)
-                disks.append((f'/dev/{name}',
-                               f'{name}  [{gb} GB]', gb))
+                disks.append((f'/dev/{name}', f'{name}  [{gb} GB]', gb))
     return disks
+
+def get_partitions(disk):
+    """Return list of (device, size_gb, fstype, mountpoint, flags) for a disk."""
+    parts = []
+    out, _, rc = sh(
+        f'lsblk -J -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,PARTFLAGS '
+        f'{disk} 2>/dev/null')
+    if rc == 0:
+        try:
+            data = json.loads(out)
+            for dev in data.get('blockdevices', []):
+                for child in dev.get('children', []):
+                    if child.get('type') == 'part':
+                        name   = child['name']
+                        size   = int(child.get('size') or 0)
+                        gb     = round(size / 1024**3, 2)
+                        fs     = child.get('fstype') or '—'
+                        mnt    = child.get('mountpoint') or ''
+                        flags  = child.get('partflags') or ''
+                        parts.append((f'/dev/{name}', gb, fs, mnt, flags))
+        except Exception:
+            pass
+    return parts
 
 def part_name(disk, n):
     return f'{disk}p{n}' if re.search(r'(nvme|mmcblk)', disk) \
            else f'{disk}{n}'
+
+def part_number(part, disk):
+    """Extract partition number from device path."""
+    s = part.replace(disk, '')
+    m = re.search(r'(\d+)$', s)
+    return int(m.group(1)) if m else 1
+
+def is_mounted(dev):
+    out, _, _ = sh(f'grep -q "^{dev} " /proc/mounts 2>/dev/null; echo $?')
+    return out.strip() == '0'
 
 def is_efi():
     return os.path.exists('/sys/firmware/efi')
@@ -90,32 +145,60 @@ def get_timezones():
     return tzs or ['Asia/Baghdad', 'Asia/Dubai', 'UTC',
                    'Europe/London', 'America/New_York']
 
-# ── Installer Window ──────────────────────────────────────────────────────────
+# ── Minimal GRUB config fallback ──────────────────────────────────────────────
+def write_minimal_grub_cfg(mnt, root_uuid):
+    """Write a minimal working grub.cfg when update-grub fails."""
+    cfg = f"""set default=0
+set timeout=5
+set timeout_style=menu
+
+insmod part_gpt
+insmod ext2
+insmod all_video
+
+menuentry "RIDOS-Core 1.0 Nova" {{
+    search --no-floppy --fs-uuid --set=root {root_uuid}
+    linux   /boot/vmlinuz root=UUID={root_uuid} ro quiet splash
+    initrd  /boot/initrd.img
+}}
+
+menuentry "RIDOS-Core (recovery mode)" {{
+    search --no-floppy --fs-uuid --set=root {root_uuid}
+    linux   /boot/vmlinuz root=UUID={root_uuid} ro single
+    initrd  /boot/initrd.img
+}}
+"""
+    grub_dir = f'{mnt}/boot/grub'
+    os.makedirs(grub_dir, exist_ok=True)
+    with open(f'{grub_dir}/grub.cfg', 'w') as f:
+        f.write(cfg)
+
+# ── Main window ───────────────────────────────────────────────────────────────
 class Installer(Gtk.Window):
 
-    STEPS = ['Welcome', 'Disk', 'Account',
-             'Timezone', 'Confirm', 'Install', 'Done']
+    STEPS = ['Welcome', 'Disk', 'Disk Manager',
+             'Account', 'Timezone', 'Confirm', 'Install', 'Done']
 
     def __init__(self):
         super().__init__(title=f'Install {VERSION}')
-        self.set_default_size(760, 560)
+        self.set_default_size(820, 600)
         self.set_position(Gtk.WindowPosition.CENTER)
         self.connect('delete-event', self._on_close)
 
-        self.step     = 0
-        self.disk     = ''
-        self.disk_gb  = 0
-        self.username = 'myuser'
-        self.password = ''
-        self.hostname = 'ridos-core'
-        self.timezone = 'Asia/Baghdad'
-        self.efi      = is_efi()
+        self.step      = 0
+        self.disk      = ''
+        self.disk_gb   = 0
+        self.username  = 'myuser'
+        self.password  = ''
+        self.hostname  = 'ridos-core'
+        self.timezone  = 'Asia/Baghdad'
+        self.efi       = is_efi()
 
         self._build_chrome()
         self._go(0)
 
     def _on_close(self, *_):
-        if self.step == 5:
+        if self.step == 6:
             return True
         Gtk.main_quit()
 
@@ -136,20 +219,19 @@ class Installer(Gtk.Window):
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.body.set_margin_start(32); self.body.set_margin_end(32)
-        self.body.set_margin_top(20);   self.body.set_margin_bottom(8)
+        self.body.set_margin_start(28); self.body.set_margin_end(28)
+        self.body.set_margin_top(16);   self.body.set_margin_bottom(8)
         sw.add(self.body)
         root.pack_start(sw, True, True, 0)
         root.pack_start(Gtk.Separator(), False, False, 0)
 
         nav = Gtk.Box(spacing=12)
-        nav.set_margin_start(32); nav.set_margin_end(32)
-        nav.set_margin_top(12);   nav.set_margin_bottom(14)
+        nav.set_margin_start(28); nav.set_margin_end(28)
+        nav.set_margin_top(10);   nav.set_margin_bottom(12)
         self._back = Gtk.Button(label='← Back')
         self._next = Gtk.Button(label='Next →')
         self._next.get_style_context().add_class('suggested-action')
-        self._back.connect('clicked',
-                           lambda _: self._go(self.step - 1))
+        self._back.connect('clicked', lambda _: self._go(self.step - 1))
         self._next.connect('clicked', self._on_next)
         nav.pack_start(self._back, False, False, 0)
         nav.pack_end(self._next, False, False, 0)
@@ -163,39 +245,40 @@ class Installer(Gtk.Window):
         self._clear()
         self.step = n
         self._htitle.set_markup(
-            f'<b><span size="large" color="#1F6FEB">'
-            f'{VERSION}</span></b>')
+            f'<b><span size="large" color="#1F6FEB">{VERSION}</span></b>')
         self._hstep.set_markup(
             f'<span color="#888">Step {n+1}/{len(self.STEPS)}: '
             f'<b>{self.STEPS[n]}</b></span>')
-        self._back.set_sensitive(0 < n < 5)
-        self._next.set_sensitive(n < 5)
-        [self._s_welcome, self._s_disk, self._s_account,
-         self._s_timezone, self._s_confirm,
+        install_step = len(self.STEPS) - 2   # 'Install' step index
+        self._back.set_sensitive(0 < n < install_step)
+        self._next.set_sensitive(n < install_step)
+        [self._s_welcome, self._s_disk, self._s_disk_mgr,
+         self._s_account, self._s_timezone, self._s_confirm,
          self._s_install,  self._s_done][n]()
         self.body.show_all()
 
     def _on_next(self, _):
         if not self._validate():
             return
-        if self.step == 4:
-            self._go(5)
-            threading.Thread(target=self._run_install,
-                             daemon=True).start()
-        elif self.step < len(self.STEPS) - 1:
+        install_step = len(self.STEPS) - 2
+        if self.step == install_step - 1:   # Confirm → Install
+            self._go(install_step)
+            threading.Thread(target=self._run_install, daemon=True).start()
+        elif self.step < install_step:
             self._go(self.step + 1)
 
     def _validate(self):
         if self.step == 1 and not self.disk:
             self._err('Please select a disk.')
             return False
-        if self.step == 2:
+        if self.step == 3:
             u  = self._ue.get_text().strip()
             p  = self._pe.get_text()
             p2 = self._p2e.get_text()
             if not re.match(r'^[a-z][a-z0-9_-]{0,30}$', u):
-                self._err('Invalid username.\nMust start with a '
-                          'lowercase letter.\nOnly: a-z 0-9 - _')
+                self._err('Invalid username.\n'
+                          'Must start with a lowercase letter.\n'
+                          'Only: a-z 0-9 - _')
                 return False
             if len(p) < 4:
                 self._err('Password must be at least 4 characters.')
@@ -205,17 +288,20 @@ class Installer(Gtk.Window):
                 return False
             self.username = u
             self.password = p
-            self.hostname = (self._he.get_text().strip()
-                             or 'ridos-core')
-        if self.step == 3:
-            self.timezone = (self._tzc.get_active_text()
-                             or 'Asia/Baghdad')
+            self.hostname = self._he.get_text().strip() or 'ridos-core'
+        if self.step == 4:
+            self.timezone = self._tzc.get_active_text() or 'Asia/Baghdad'
         return True
 
     def _err(self, msg):
-        d = Gtk.MessageDialog(
-            transient_for=self, modal=True,
+        d = Gtk.MessageDialog(transient_for=self, modal=True,
             message_type=Gtk.MessageType.ERROR,
+            buttons=Gtk.ButtonsType.OK, text=msg)
+        d.run(); d.destroy()
+
+    def _info(self, msg):
+        d = Gtk.MessageDialog(transient_for=self, modal=True,
+            message_type=Gtk.MessageType.INFO,
             buttons=Gtk.ButtonsType.OK, text=msg)
         d.run(); d.destroy()
 
@@ -238,8 +324,7 @@ class Installer(Gtk.Window):
         l.set_margin_top(top)
         return l
 
-    # ── Steps ─────────────────────────────────────────────────────────────────
-
+    # ── Step 0: Welcome ───────────────────────────────────────────────────────
     def _s_welcome(self):
         self._add(self._lbl(
             f'<span size="x-large" weight="bold" color="#1F6FEB">'
@@ -251,7 +336,7 @@ class Installer(Gtk.Window):
         for txt, warn in [
             ('', False),
             (f'Boot mode detected: {mode}', False),
-            ('Based on Debian 12 Bookworm + Linux 6.12 LTS', False),
+            ('Debian 12 Bookworm + Linux 6.12 LTS', False),
             ('GNOME desktop + Brave Browser + Pro IT toolkit', False),
             ('', False),
             ('⚠  WARNING: The selected disk will be erased.', True),
@@ -266,6 +351,7 @@ class Installer(Gtk.Window):
             self._add(l)
         self._next.set_label('Start →')
 
+    # ── Step 1: Disk selection ─────────────────────────────────────────────
     def _s_disk(self):
         self._add(self._lbl(
             '<b><span size="large">Select Target Disk</span></b>',
@@ -308,6 +394,425 @@ class Installer(Gtk.Window):
             rb.set_margin_top(10)
             self._add(rb)
 
+    # ── Step 2: Disk Manager ──────────────────────────────────────────────────
+    def _s_disk_mgr(self):
+        self._add(self._lbl(
+            '<b><span size="large">Disk Manager</span></b>',
+            markup=True))
+        self._add(self._lbl(
+            f'Disk: {self.disk}  •  Use the buttons below to manage partitions,\n'
+            'or click Next to use automatic partitioning.',
+            color='#888', top=4))
+
+        # Partition list
+        self._part_store = Gtk.ListStore(str, str, str, str, str)
+        self._part_view  = Gtk.TreeView(model=self._part_store)
+        self._part_view.set_margin_top(10)
+
+        for i, title in enumerate(['Device', 'Size (GB)', 'Filesystem',
+                                    'Mountpoint', 'Flags']):
+            col = Gtk.TreeViewColumn(
+                title, Gtk.CellRendererText(), text=i)
+            col.set_min_width(90)
+            self._part_view.append_column(col)
+
+        sw = Gtk.ScrolledWindow()
+        sw.set_min_content_height(160)
+        sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        sw.add(self._part_view)
+        self._add(sw, expand=False, top=4)
+        self._refresh_parts()
+
+        # ── 8-button toolbar ──────────────────────────────────────────────
+        btn_box = Gtk.Box(spacing=6)
+        btn_box.set_margin_top(10)
+
+        def mkbtn(label, cb, style=None):
+            b = Gtk.Button(label=label)
+            if style:
+                b.get_style_context().add_class(style)
+            b.connect('clicked', cb)
+            btn_box.pack_start(b, False, False, 0)
+            return b
+
+        mkbtn('+ EXT4',     self._dm_add_ext4)
+        mkbtn('+ Swap',     self._dm_add_swap)
+        mkbtn('Set Boot',   self._dm_set_boot)
+        mkbtn('Set Active', self._dm_set_active)
+        mkbtn('Resize',     self._dm_resize)
+        mkbtn('Format',     self._dm_format)
+        mkbtn('Delete',     self._dm_delete, 'destructive-action')
+        mkbtn('Mount',      self._dm_mount)
+
+        self._add(btn_box)
+
+        # Output log for disk operations
+        self._dm_buf = Gtk.TextBuffer()
+        dm_tv = Gtk.TextView(buffer=self._dm_buf)
+        dm_tv.set_editable(False)
+        dm_tv.set_monospace(True)
+        dm_sc = Gtk.ScrolledWindow()
+        dm_sc.set_min_content_height(80)
+        dm_sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+        dm_sc.add(dm_tv)
+        self._add(dm_sc, expand=False, top=8)
+
+        self._add(self._lbl(
+            'Tip: For a standard install, click Next — '
+            'automatic partitioning will be used.',
+            color='#1F6FEB', top=8))
+
+    def _dm_log(self, msg):
+        GLib.idle_add(self._dm_buf.insert,
+                      self._dm_buf.get_end_iter(), msg + '\n')
+
+    def _refresh_parts(self):
+        self._part_store.clear()
+        for dev, gb, fs, mnt, flags in get_partitions(self.disk):
+            self._part_store.append([dev, str(gb), fs, mnt, flags])
+
+    def _selected_part(self):
+        sel = self._part_view.get_selection()
+        model, it = sel.get_selected()
+        if it is None:
+            self._err('Select a partition from the list first.')
+            return None
+        return model[it][0]   # device path
+
+    # ── Disk Manager button handlers ──────────────────────────────────────────
+    def _dm_add_ext4(self, _):
+        d = Gtk.Dialog(title='Add EXT4 Partition',
+                       transient_for=self, modal=True)
+        d.add_buttons('Cancel', Gtk.ResponseType.CANCEL,
+                      'Create',  Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_margin_start(16); box.set_margin_end(16)
+        box.set_margin_top(12);   box.set_margin_bottom(12)
+        box.add(Gtk.Label(label='Size in GB (0 = use all remaining space):'))
+        spin = Gtk.SpinButton.new_with_range(0, 2000, 1)
+        spin.set_value(0)
+        box.add(spin)
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK:
+            size_gb = int(spin.get_value())
+            d.destroy()
+            threading.Thread(
+                target=self._do_add_part,
+                args=(size_gb, 'ext4'), daemon=True).start()
+        else:
+            d.destroy()
+
+    def _dm_add_swap(self, _):
+        d = Gtk.Dialog(title='Add Swap Partition',
+                       transient_for=self, modal=True)
+        d.add_buttons('Cancel', Gtk.ResponseType.CANCEL,
+                      'Create',  Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_margin_start(16); box.set_margin_end(16)
+        box.set_margin_top(12);   box.set_margin_bottom(12)
+        box.add(Gtk.Label(label='Swap size in GB:'))
+        spin = Gtk.SpinButton.new_with_range(1, 64, 1)
+        spin.set_value(2)
+        box.add(spin)
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK:
+            size_gb = int(spin.get_value())
+            d.destroy()
+            threading.Thread(
+                target=self._do_add_part,
+                args=(size_gb, 'linux-swap'), daemon=True).start()
+        else:
+            d.destroy()
+
+    def _do_add_part(self, size_gb, fstype):
+        # Find where current partitions end
+        out, _, _ = sh(
+            f'parted -s {self.disk} unit MiB print 2>/dev/null')
+        end_mib = 1
+        for line in out.splitlines():
+            m = re.search(r'(\d+(?:\.\d+)?)\s*MiB\s*$', line)
+            if m:
+                end_mib = max(end_mib, float(m.group(1)))
+
+        start = end_mib + 1
+        if size_gb == 0:
+            end = '100%'
+        else:
+            end = f'{int(start + size_gb * 1024)}MiB'
+
+        self._dm_log(f'Adding {fstype} partition: {start}MiB → {end}')
+        out, err, rc = sh(
+            f'parted -s {self.disk} mkpart primary '
+            f'{fstype} {start}MiB {end}')
+        if rc != 0:
+            self._dm_log(f'ERROR: {err}')
+            return
+        sh('partprobe 2>/dev/null || true')
+        sh('udevadm settle 2>/dev/null || true')
+        sh('sleep 2')
+
+        # Format the new partition
+        parts = get_partitions(self.disk)
+        if parts:
+            new_dev = parts[-1][0]
+            if fstype == 'ext4':
+                _, err, rc = sh(
+                    f'mkfs.ext4 -F '
+                    f'-E lazy_itable_init=0,lazy_journal_init=0 '
+                    f'{new_dev}')
+                self._dm_log(
+                    f'Formatted {new_dev} as ext4' if rc == 0
+                    else f'Format error: {err}')
+            elif fstype == 'linux-swap':
+                sh(f'mkswap {new_dev}')
+                self._dm_log(f'Formatted {new_dev} as swap')
+
+        GLib.idle_add(self._refresh_parts)
+        self._dm_log('Done.')
+
+    def _dm_set_boot(self, _):
+        dev = self._selected_part()
+        if not dev:
+            return
+        n = part_number(dev, self.disk)
+        self._dm_log(f'Setting boot flag on {dev} (partition {n})...')
+        out, err, rc = sh(
+            f'parted -s {self.disk} set {n} boot on')
+        self._dm_log('Boot flag set.' if rc == 0 else f'ERROR: {err}')
+        self._refresh_parts()
+
+    def _dm_set_active(self, _):
+        dev = self._selected_part()
+        if not dev:
+            return
+        n = part_number(dev, self.disk)
+        self._dm_log(f'Setting esp+active flag on {dev} (partition {n})...')
+        # Set ESP flag (for UEFI)
+        out, err, rc = sh(
+            f'parted -s {self.disk} set {n} esp on')
+        if rc != 0:
+            self._dm_log(f'esp flag warning: {err}')
+        # Also set boot flag
+        sh(f'parted -s {self.disk} set {n} boot on')
+        # For BIOS: sfdisk --activate
+        if not is_efi():
+            sh(f'sfdisk --activate {self.disk} {n} 2>/dev/null || true')
+        self._dm_log('Active flag set.')
+        self._refresh_parts()
+
+    def _dm_resize(self, _):
+        dev = self._selected_part()
+        if not dev:
+            return
+
+        if is_mounted(dev):
+            self._err(f'{dev} is currently mounted.\n'
+                      'Unmount it first before resizing.')
+            return
+
+        # Detect filesystem
+        fs, _, _ = sh(f'blkid -s TYPE -o value {dev}')
+        if fs not in ('ext4', 'ext3', 'ext2', 'xfs'):
+            self._err(f'Resize supports ext4 and xfs only.\n'
+                      f'Detected filesystem: {fs or "unknown"}')
+            return
+
+        # Ask for new size
+        d = Gtk.Dialog(title=f'Resize {dev}',
+                       transient_for=self, modal=True)
+        d.add_buttons('Cancel', Gtk.ResponseType.CANCEL,
+                      'Resize',  Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_margin_start(16); box.set_margin_end(16)
+        box.set_margin_top(12);   box.set_margin_bottom(12)
+        box.add(Gtk.Label(
+            label=f'New size for {dev} ({fs}) in GB:\n'
+                  f'(must be smaller than current size to shrink,\n'
+                  f' 0 = expand to fill available space)'))
+        spin = Gtk.SpinButton.new_with_range(0, 2000, 1)
+        spin.set_value(0)
+        box.add(spin)
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK:
+            size_gb = int(spin.get_value())
+            d.destroy()
+            threading.Thread(
+                target=self._do_resize,
+                args=(dev, fs, size_gb), daemon=True).start()
+        else:
+            d.destroy()
+
+    def _do_resize(self, dev, fs, size_gb):
+        n = part_number(dev, self.disk)
+        self._dm_log(f'Resizing {dev} ({fs}) to '
+                     f'{"max" if size_gb == 0 else str(size_gb)+" GB"}...')
+
+        if fs in ('ext4', 'ext3', 'ext2'):
+            # Step 1: fsck (required before resize)
+            self._dm_log('Running e2fsck...')
+            out, err, rc = sh(f'e2fsck -fy {dev}', timeout=120)
+            self._dm_log(out or err)
+            if rc > 2:   # rc 1/2 = errors fixed, >2 = unfixable
+                self._dm_log(f'ERROR: e2fsck failed (rc={rc})')
+                return
+
+            # Step 2: resize partition in parted
+            if size_gb > 0:
+                # Get partition start first
+                out2, _, _ = sh(
+                    f'parted -s {self.disk} unit MiB print 2>/dev/null')
+                start_mib = None
+                for line in out2.splitlines():
+                    if re.match(rf'\s*{n}\s+', line):
+                        m = re.search(r'(\d+(?:\.\d+)?)\s*MiB', line)
+                        if m:
+                            start_mib = float(m.group(1))
+                end_mib = (start_mib or 0) + size_gb * 1024
+                self._dm_log(f'Resizing partition to {end_mib:.0f}MiB...')
+                out, err, rc = sh(
+                    f'parted -s {self.disk} resizepart {n} {end_mib:.0f}MiB')
+                if rc != 0:
+                    self._dm_log(f'ERROR resizing partition: {err}')
+                    return
+                sh('partprobe 2>/dev/null || true')
+                sh('sleep 2')
+
+            # Step 3: resize filesystem
+            self._dm_log('Running resize2fs...')
+            target = f'{size_gb}G' if size_gb > 0 else ''
+            out, err, rc = sh(f'resize2fs {dev} {target}', timeout=120)
+            self._dm_log(out or err)
+            self._dm_log('EXT4 resize complete.' if rc == 0
+                         else f'resize2fs error (rc={rc})')
+
+        elif fs == 'xfs':
+            # XFS can only grow, not shrink; must be mounted to resize
+            self._dm_log('XFS: mounting temporarily to run xfs_growfs...')
+            tmp = '/tmp/ridos_xfs_resize'
+            sh(f'mkdir -p {tmp}')
+            _, err, rc = sh(f'mount {dev} {tmp}')
+            if rc != 0:
+                self._dm_log(f'Mount failed: {err}')
+                return
+            out, err, rc = sh(f'xfs_growfs {tmp}', timeout=120)
+            self._dm_log(out or err)
+            sh(f'umount {tmp}')
+            self._dm_log('XFS grow complete.' if rc == 0
+                         else f'xfs_growfs error (rc={rc})')
+
+        GLib.idle_add(self._refresh_parts)
+        self._dm_log('Done.')
+
+    def _dm_format(self, _):
+        dev = self._selected_part()
+        if not dev:
+            return
+
+        if is_mounted(dev):
+            self._err(f'{dev} is mounted. Unmount it first.')
+            return
+
+        d = Gtk.Dialog(title=f'Format {dev}',
+                       transient_for=self, modal=True)
+        d.add_buttons('Cancel', Gtk.ResponseType.CANCEL,
+                      'Format',  Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_margin_start(16); box.set_margin_end(16)
+        box.set_margin_top(12);   box.set_margin_bottom(12)
+        box.add(Gtk.Label(label=f'Format {dev} as:'))
+        combo = Gtk.ComboBoxText()
+        for fs in ['ext4', 'fat32', 'ntfs', 'swap']:
+            combo.append_text(fs)
+        combo.set_active(0)
+        box.add(combo)
+        box.add(Gtk.Label(
+            label='\n⚠  ALL DATA ON THIS PARTITION WILL BE LOST'))
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK:
+            fs = combo.get_active_text()
+            d.destroy()
+            threading.Thread(
+                target=self._do_format,
+                args=(dev, fs), daemon=True).start()
+        else:
+            d.destroy()
+
+    def _do_format(self, dev, fs):
+        self._dm_log(f'Formatting {dev} as {fs}...')
+        cmds = {
+            'ext4': (f'mkfs.ext4 -F '
+                     f'-E lazy_itable_init=0,lazy_journal_init=0 {dev}'),
+            'fat32': f'mkfs.fat -F 32 {dev}',
+            'ntfs':  f'mkfs.ntfs -Q {dev}',
+            'swap':  f'mkswap {dev}',
+        }
+        out, err, rc = sh(cmds.get(fs, ''), timeout=120)
+        self._dm_log(
+            f'Formatted as {fs}.' if rc == 0
+            else f'ERROR: {err}')
+        GLib.idle_add(self._refresh_parts)
+
+    def _dm_delete(self, _):
+        dev = self._selected_part()
+        if not dev:
+            return
+
+        if is_mounted(dev):
+            self._err(f'{dev} is mounted. Unmount it first.')
+            return
+
+        n = part_number(dev, self.disk)
+        d = Gtk.MessageDialog(
+            transient_for=self, modal=True,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.YES_NO,
+            text=f'Delete partition {dev}?\n\nALL DATA WILL BE LOST.')
+        if d.run() == Gtk.ResponseType.YES:
+            d.destroy()
+            self._dm_log(f'Deleting partition {n} on {self.disk}...')
+            out, err, rc = sh(
+                f'parted -s {self.disk} rm {n}')
+            sh('partprobe 2>/dev/null || true')
+            sh('sleep 1')
+            self._dm_log(
+                f'Partition {n} deleted.' if rc == 0
+                else f'ERROR: {err}')
+            self._refresh_parts()
+        else:
+            d.destroy()
+
+    def _dm_mount(self, _):
+        dev = self._selected_part()
+        if not dev:
+            return
+
+        d = Gtk.Dialog(title=f'Mount {dev}',
+                       transient_for=self, modal=True)
+        d.add_buttons('Cancel', Gtk.ResponseType.CANCEL,
+                      'Mount',   Gtk.ResponseType.OK)
+        box = d.get_content_area()
+        box.set_margin_start(16); box.set_margin_end(16)
+        box.set_margin_top(12);   box.set_margin_bottom(12)
+        box.add(Gtk.Label(label=f'Mount {dev} at:'))
+        entry = Gtk.Entry()
+        entry.set_text('/mnt')
+        box.add(entry)
+        d.show_all()
+        if d.run() == Gtk.ResponseType.OK:
+            mnt = entry.get_text().strip()
+            d.destroy()
+            if mnt:
+                sh(f'mkdir -p {mnt}')
+                out, err, rc = sh(f'mount {dev} {mnt}')
+                if rc == 0:
+                    self._dm_log(f'Mounted {dev} at {mnt}')
+                else:
+                    self._dm_log(f'Mount failed: {err}')
+                self._refresh_parts()
+        else:
+            d.destroy()
+
+    # ── Step 3: Account ───────────────────────────────────────────────────────
     def _s_account(self):
         self._add(self._lbl(
             '<b><span size="large">Create Your Account</span></b>',
@@ -341,6 +846,7 @@ class Installer(Gtk.Window):
         row(3, 'Computer name:',    self._he)
         self._add(grid)
 
+    # ── Step 4: Timezone ──────────────────────────────────────────────────────
     def _s_timezone(self):
         self._add(self._lbl(
             '<b><span size="large">Select Timezone</span></b>',
@@ -356,6 +862,7 @@ class Installer(Gtk.Window):
         self._tzc.set_active(sel)
         self._add(self._tzc)
 
+    # ── Step 5: Confirm ───────────────────────────────────────────────────────
     def _s_confirm(self):
         self._add(self._lbl(
             '<b><span size="large">Ready to Install</span></b>',
@@ -387,6 +894,7 @@ class Installer(Gtk.Window):
         self._next.set_label('⚠  Install Now')
         self._next.get_style_context().add_class('destructive-action')
 
+    # ── Step 6: Install progress ──────────────────────────────────────────────
     def _s_install(self):
         self._back.set_sensitive(False)
         self._next.set_sensitive(False)
@@ -405,8 +913,7 @@ class Installer(Gtk.Window):
         self._add(self._slbl)
         sc = Gtk.ScrolledWindow()
         sc.set_min_content_height(290)
-        sc.set_policy(Gtk.PolicyType.AUTOMATIC,
-                      Gtk.PolicyType.AUTOMATIC)
+        sc.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         self._buf = Gtk.TextBuffer()
         tv = Gtk.TextView(buffer=self._buf)
         tv.set_editable(False)
@@ -421,13 +928,13 @@ class Installer(Gtk.Window):
         GLib.idle_add(self._slbl.set_text, msg)
         GLib.idle_add(self._prog.set_fraction, frac)
 
+    # ── Step 7: Done ──────────────────────────────────────────────────────────
     def _s_done(self):
         self._back.set_sensitive(False)
         self._next.set_label('🔄  Reboot Now')
         self._next.set_sensitive(True)
         self._next.get_style_context().remove_class('destructive-action')
-        self._next.connect('clicked',
-                           lambda _: sh('reboot', timeout=10))
+        self._next.connect('clicked', lambda _: sh('reboot', timeout=10))
         self._add(self._lbl(
             '<span size="xx-large" weight="bold" color="#238636">'
             '✓  Installation Complete!</span>', markup=True))
@@ -458,72 +965,63 @@ class Installer(Gtk.Window):
             GLib.idle_add(self._next.set_sensitive, False)
 
         try:
-            # ── 1. Clean up any leftover mounts ───────────────────────────
+            # ── 1. Clean mounts ───────────────────────────────────────────
             self._status('Cleaning up...', 0.01)
-            log(f'Target mount point: {mnt}')
-            for subdir in ['dev/pts', 'dev', 'proc', 'sys', 'run',
-                           'boot/efi', '']:
-                sh(f'umount -l {mnt}/{subdir} 2>/dev/null || true')
+            log(f'Target: {mnt}')
+            for sub in ['dev/pts','dev','proc','sys','run','boot/efi','']:
+                sh(f'umount -l {mnt}/{sub} 2>/dev/null || true')
             sh(f'rm -rf {mnt}')
             sh(f'mkdir -p {mnt}')
 
-            # ── 2. Partition disk ─────────────────────────────────────────
+            # ── 2. Partition ──────────────────────────────────────────────
             self._status(f'Partitioning {disk}...', 0.04)
-            log(f'Creating GPT partitions on {disk}...')
-
             if efi:
+                log('GPT layout (UEFI): EFI 512MB + swap 2GB + root')
                 sh(f'parted -s {disk} mklabel gpt')
                 sh(f'parted -s {disk} mkpart ESP fat32 1MiB 513MiB')
+                # EFI partition: esp + boot flags
                 sh(f'parted -s {disk} set 1 esp on')
-                sh(f'parted -s {disk} mkpart primary linux-swap '
-                   f'513MiB 2561MiB')
-                sh(f'parted -s {disk} mkpart primary ext4 '
-                   f'2561MiB 100%')
+                sh(f'parted -s {disk} set 1 boot on')
+                sh(f'parted -s {disk} mkpart primary linux-swap 513MiB 2561MiB')
+                sh(f'parted -s {disk} mkpart primary ext4 2561MiB 100%')
+                # Root partition: boot flag
+                sh(f'parted -s {disk} set 3 boot on')
                 efi_part  = part_name(disk, 1)
                 swap_part = part_name(disk, 2)
                 root_part = part_name(disk, 3)
             else:
+                log('MBR layout (BIOS): swap 2GB + root (bootable)')
                 sh(f'parted -s {disk} mklabel msdos')
-                sh(f'parted -s {disk} mkpart primary linux-swap '
-                   f'1MiB 2049MiB')
-                sh(f'parted -s {disk} mkpart primary ext4 '
-                   f'2049MiB 100%')
+                sh(f'parted -s {disk} mkpart primary linux-swap 1MiB 2049MiB')
+                sh(f'parted -s {disk} mkpart primary ext4 2049MiB 100%')
                 sh(f'parted -s {disk} set 2 boot on')
                 efi_part  = None
                 swap_part = part_name(disk, 1)
                 root_part = part_name(disk, 2)
 
-            log(f'Layout: root={root_part} swap={swap_part} '
-                f'efi={efi_part}')
+            log(f'root={root_part}  swap={swap_part}  efi={efi_part}')
 
-            # ── 3. Wait for kernel to register partitions ─────────────────
-            # CRITICAL: without this, /dev/sda2 does not exist yet
-            self._status(
-                'Waiting for kernel to register partitions...', 0.07)
-            log('Running partprobe + udevadm settle...')
+            # ── 3. Wait for kernel ────────────────────────────────────────
+            self._status('Waiting for kernel to register partitions...', 0.07)
+            log('partprobe + udevadm settle...')
             sh('partprobe 2>/dev/null || true')
             sh('udevadm settle 2>/dev/null || true')
             sh('sleep 3')
 
-            # Verify each partition exists before proceeding
-            parts_to_check = [root_part, swap_part]
-            if efi_part:
-                parts_to_check.append(efi_part)
-
-            for p_check in parts_to_check:
+            for p_check in ([efi_part] if efi_part else []) + \
+                           [swap_part, root_part]:
                 if not os.path.exists(p_check):
-                    log(f'{p_check} not found yet, waiting 3s...')
+                    log(f'{p_check} not found, waiting 3s...')
                     sh('sleep 3')
                     sh('udevadm settle 2>/dev/null || true')
                 if not os.path.exists(p_check):
                     return fail(
-                        f'Partition {p_check} was not created.\n'
-                        f'Ensure the disk is not in use and retry.')
-                log(f'OK: {p_check} exists')
+                        f'Partition {p_check} not created.\n'
+                        f'Ensure disk is not in use and retry.')
+                log(f'OK: {p_check}')
 
-            # ── 4. Format partitions ──────────────────────────────────────
-            self._status('Formatting partitions...', 0.10)
-
+            # ── 4. Format ─────────────────────────────────────────────────
+            self._status('Formatting...', 0.10)
             if efi_part:
                 log(f'Formatting EFI: {efi_part}')
                 _, err, rc = sh(f'mkfs.fat -F 32 {efi_part}')
@@ -535,47 +1033,29 @@ class Installer(Gtk.Window):
             sh(f'swapon {swap_part} 2>/dev/null || true')
 
             log(f'Formatting root: {root_part}')
-            # lazy_itable_init=0,lazy_journal_init=0 = full init
             _, err, rc = sh(
                 f'mkfs.ext4 -F '
                 f'-E lazy_itable_init=0,lazy_journal_init=0 '
                 f'{root_part}')
             if rc != 0:
                 return fail(f'mkfs.ext4 failed: {err}')
-            log('Formatting done.')
+            log('Format complete.')
 
-            # ── 5. Mount target ───────────────────────────────────────────
+            # ── 5. Mount ──────────────────────────────────────────────────
             self._status('Mounting...', 0.13)
             _, err, rc = sh(f'mount {root_part} {mnt}')
             if rc != 0:
-                return fail(f'mount failed: {err}')
+                return fail(f'mount root failed: {err}')
             if efi_part:
                 sh(f'mkdir -p {mnt}/boot/efi')
-                _, err, rc = sh(
-                    f'mount {efi_part} {mnt}/boot/efi')
+                _, err, rc = sh(f'mount {efi_part} {mnt}/boot/efi')
                 if rc != 0:
                     return fail(f'mount EFI failed: {err}')
             log(f'Mounted at {mnt}')
 
-            # ── 6. Copy filesystem with rsync ─────────────────────────────
-            # THE FIX: exclude the EXACT mount point path, not just /mnt/*
-            # Without this, rsync copies itself into itself infinitely.
-            #
-            # We exclude:
-            #   /mnt/ridos_target  <- the destination (prevents recursion)
-            #   /dev/* /proc/* /sys/* /run/* /tmp/*  <- virtual filesystems
-            #   /media/*           <- other mounted media
-            #   /lost+found        <- fsck artifacts
-            #
-            # rsync runs BEFORE bind mounts — bind mounts must not
-            # interfere with the copy.
-            self._status(
-                'Copying filesystem... (5-15 min, please wait)',
-                0.15)
-            log('Starting rsync...')
-            log(f'Copying live system to {mnt}')
-            log(f'Excluding: {mnt} (prevents infinite recursion)')
-
+            # ── 6. rsync ──────────────────────────────────────────────────
+            self._status('Copying filesystem (5-15 min)...', 0.15)
+            log(f'rsync → {mnt}  (excluding {mnt} to prevent recursion)')
             rc = sh_log(
                 f'rsync -aAX '
                 f'--exclude="{mnt}" '
@@ -589,58 +1069,50 @@ class Installer(Gtk.Window):
                 f'--exclude="/opt/ridos-core/logs/*" '
                 f'/ {mnt}/',
                 self._log, timeout=3600)
-
-            # rsync exit codes 23/24 are acceptable
-            # (some files not transferred = virtual FS entries)
             if rc not in (0, 23, 24):
                 log(f'WARNING: rsync returned {rc} — continuing')
             log('rsync complete.')
 
-            # ── 7. Bind system dirs (AFTER rsync) ─────────────────────────
+            # ── 7. Bind mounts (AFTER rsync) ──────────────────────────────
             self._status('Binding system directories...', 0.65)
             for d in ['/dev', '/dev/pts', '/proc', '/sys', '/run']:
                 sh(f'mkdir -p {mnt}{d}')
-                sh(f'mount --bind {d} {mnt}{d}')
-                log(f'Bound: {d} → {mnt}{d}')
+                _, err, rc = sh(f'mount --bind {d} {mnt}{d}')
+                if rc == 0:
+                    log(f'Bound: {d} → {mnt}{d}')
+                else:
+                    log(f'WARNING: bind {d} failed: {err}')
 
-            # ── 8. Configure inside chroot ────────────────────────────────
-            self._status('Configuring system...', 0.68)
-
+            # ── 8. Configure ──────────────────────────────────────────────
+            self._status('Configuring...', 0.68)
             open(f'{mnt}/etc/hostname', 'w').write(host + '\n')
             open(f'{mnt}/etc/hosts', 'w').write(
                 f'127.0.0.1   localhost\n'
                 f'127.0.1.1   {host}\n'
                 f'::1         localhost ip6-localhost ip6-loopback\n')
-            log(f'Hostname: {host}')
-
-            sh(f'ln -sf /usr/share/zoneinfo/{tz} '
-               f'{mnt}/etc/localtime')
+            sh(f'ln -sf /usr/share/zoneinfo/{tz} {mnt}/etc/localtime')
             open(f'{mnt}/etc/timezone', 'w').write(tz + '\n')
-            log(f'Timezone: {tz}')
+            log(f'Hostname: {host}  Timezone: {tz}')
 
             # fstab
             self._status('Writing fstab...', 0.71)
-            root_uuid, _, _ = sh(
-                f'blkid -s UUID -o value {root_part}')
+            root_uuid, _, _ = sh(f'blkid -s UUID -o value {root_part}')
             fstab = (
                 f'UUID={root_uuid.strip()} / ext4 '
                 f'defaults,errors=remount-ro 0 1\n'
                 f'tmpfs /tmp tmpfs '
                 f'defaults,noatime,nosuid,nodev,size=2G 0 0\n')
             if efi_part:
-                efi_uuid, _, _ = sh(
-                    f'blkid -s UUID -o value {efi_part}')
+                efi_uuid, _, _ = sh(f'blkid -s UUID -o value {efi_part}')
                 fstab += (f'UUID={efi_uuid.strip()} /boot/efi '
                           f'vfat defaults 0 2\n')
             if swap_part:
-                sw_uuid, _, _ = sh(
-                    f'blkid -s UUID -o value {swap_part}')
-                fstab += (f'UUID={sw_uuid.strip()} '
-                          f'none swap sw 0 0\n')
+                sw_uuid, _, _ = sh(f'blkid -s UUID -o value {swap_part}')
+                fstab += f'UUID={sw_uuid.strip()} none swap sw 0 0\n'
             open(f'{mnt}/etc/fstab', 'w').write(fstab)
             log('fstab written.')
 
-            # create user
+            # User
             self._status(f'Creating user {user}...', 0.74)
             sh(f'chroot {mnt} useradd -m -s /bin/bash '
                f'-G sudo,audio,video,netdev,plugdev '
@@ -648,14 +1120,13 @@ class Installer(Gtk.Window):
             proc = subprocess.Popen(
                 f'chroot {mnt} chpasswd',
                 shell=True, stdin=subprocess.PIPE)
-            proc.communicate(
-                input=f'{user}:{pw}\n'.encode())
+            proc.communicate(input=f'{user}:{pw}\n'.encode())
             sh(f'echo "{user} ALL=(ALL) ALL" '
                f'> {mnt}/etc/sudoers.d/{user}')
             sh(f'chmod 440 {mnt}/etc/sudoers.d/{user}')
             log(f'User {user} created.')
 
-            # disable live autologin
+            # Disable live autologin
             gdm = f'{mnt}/etc/gdm3/custom.conf'
             if os.path.exists(gdm):
                 c = open(gdm).read()
@@ -663,15 +1134,30 @@ class Installer(Gtk.Window):
                 c = re.sub(r'AutomaticLogin\s*=.*\n', '', c)
                 open(gdm, 'w').write(c)
 
-            # remove installer autostart from installed system
+            # Remove live autostart from installed system
             sh(f'rm -f {mnt}/etc/xdg/autostart/'
                f'ridos-installer.desktop 2>/dev/null || true')
+            sh(f'rm -f {mnt}/etc/xdg/autostart/'
+               f'ridos-welcome.desktop 2>/dev/null || true')
 
-            # ── 9. Install GRUB inside chroot ─────────────────────────────
-            self._status('Installing GRUB (inside chroot)...', 0.78)
-            log('Updating apt inside chroot...')
+            # os-prober for multi-boot
+            grub_def = f'{mnt}/etc/default/grub'
+            if os.path.exists(grub_def):
+                c = open(grub_def).read()
+                if 'GRUB_DISABLE_OS_PROBER' not in c:
+                    c += '\nGRUB_DISABLE_OS_PROBER=false\n'
+                else:
+                    c = re.sub(r'#?GRUB_DISABLE_OS_PROBER=.*',
+                               'GRUB_DISABLE_OS_PROBER=false', c)
+                open(grub_def, 'w').write(c)
+
+            # ── 9. GRUB inside chroot with fallback ───────────────────────
+            self._status('Installing GRUB...', 0.78)
+            log('apt-get update inside chroot...')
             sh_log(f'chroot {mnt} apt-get update -qq',
                    self._log, timeout=120)
+
+            grub_ok = False
 
             if efi:
                 log('Installing grub-efi inside chroot...')
@@ -680,13 +1166,33 @@ class Installer(Gtk.Window):
                     f'--no-install-recommends '
                     f'grub-efi-amd64-bin grub-efi-amd64 os-prober',
                     self._log, timeout=300)
+                log('Running grub-install (chroot, EFI)...')
                 rc = sh_log(
                     f'chroot {mnt} grub-install '
                     f'--target=x86_64-efi '
                     f'--efi-directory=/boot/efi '
+                    f'--boot-directory={mnt}/boot '
                     f'--bootloader-id=RIDOS-Core '
                     f'--recheck',
                     self._log, timeout=120)
+                if rc == 0:
+                    grub_ok = True
+                else:
+                    log(f'chroot grub-install returned {rc}')
+                    log('Trying fallback: live-system grub-install...')
+                    rc2 = sh_log(
+                        f'grub-install '
+                        f'--target=x86_64-efi '
+                        f'--efi-directory={mnt}/boot/efi '
+                        f'--boot-directory={mnt}/boot '
+                        f'--bootloader-id=RIDOS-Core '
+                        f'--recheck {disk}',
+                        self._log, timeout=120)
+                    if rc2 == 0:
+                        grub_ok = True
+                        log('Fallback grub-install succeeded.')
+                    else:
+                        log('Both EFI grub-install attempts failed.')
             else:
                 log('Installing grub-pc inside chroot...')
                 sh_log(
@@ -694,31 +1200,48 @@ class Installer(Gtk.Window):
                     f'--no-install-recommends '
                     f'grub-pc grub-pc-bin os-prober',
                     self._log, timeout=300)
+                log('Running grub-install (chroot, BIOS)...')
                 rc = sh_log(
                     f'chroot {mnt} grub-install '
                     f'--target=i386-pc '
-                    f'--recheck '
-                    f'{disk}',
+                    f'--boot-directory={mnt}/boot '
+                    f'--recheck {disk}',
                     self._log, timeout=120)
+                if rc == 0:
+                    grub_ok = True
+                else:
+                    log(f'chroot grub-install returned {rc}')
+                    log('Trying fallback: live-system grub-install...')
+                    rc2 = sh_log(
+                        f'grub-install '
+                        f'--target=i386-pc '
+                        f'--boot-directory={mnt}/boot '
+                        f'--recheck {disk}',
+                        self._log, timeout=120)
+                    if rc2 == 0:
+                        grub_ok = True
+                        log('Fallback grub-install succeeded.')
+                    else:
+                        log('Both BIOS grub-install attempts failed.')
+
+            if not grub_ok:
+                log('⚠  Both grub-install attempts failed.')
+                log('System may not boot. Continuing anyway...')
+
+            # ── 10. update-grub with manual fallback ──────────────────────
+            self._status('Generating GRUB config...', 0.88)
+            log('Running update-grub...')
+            rc = sh_log(
+                f'chroot {mnt} update-grub',
+                self._log, timeout=120)
 
             if rc != 0:
-                log(f'WARNING: grub-install returned {rc}')
-
-            # enable os-prober for multi-boot detection
-            grub_default = f'{mnt}/etc/default/grub'
-            if os.path.exists(grub_default):
-                c = open(grub_default).read()
-                if 'GRUB_DISABLE_OS_PROBER' not in c:
-                    c += '\nGRUB_DISABLE_OS_PROBER=false\n'
-                else:
-                    c = re.sub(r'#?GRUB_DISABLE_OS_PROBER=.*',
-                               'GRUB_DISABLE_OS_PROBER=false', c)
-                open(grub_default, 'w').write(c)
-
-            # ── 10. update-grub ───────────────────────────────────────────
-            self._status('Generating GRUB config...', 0.88)
-            sh_log(f'chroot {mnt} update-grub',
-                   self._log, timeout=120)
+                log(f'update-grub returned {rc} — writing minimal grub.cfg')
+                try:
+                    write_minimal_grub_cfg(mnt, root_uuid.strip())
+                    log('Minimal grub.cfg written as fallback.')
+                except Exception as ex:
+                    log(f'Could not write fallback grub.cfg: {ex}')
 
             # ── 11. Remove live packages ──────────────────────────────────
             self._status('Removing live packages...', 0.93)
@@ -728,9 +1251,9 @@ class Installer(Gtk.Window):
                 f'2>/dev/null || true',
                 self._log, timeout=120)
 
-            # ── 12. Unmount cleanly ───────────────────────────────────────
+            # ── 12. Unmount ───────────────────────────────────────────────
             self._status('Unmounting...', 0.97)
-            log('Unmounting...')
+            log('Unmounting all...')
             for d in ['dev/pts', 'dev', 'proc', 'sys', 'run']:
                 sh(f'umount -l {mnt}/{d} 2>/dev/null || true')
             sh(f'umount -l {mnt}/boot/efi 2>/dev/null || true')
@@ -739,8 +1262,8 @@ class Installer(Gtk.Window):
 
             self._status('Installation complete!', 1.0)
             log('\n✓  RIDOS-Core installed successfully!')
-            log('Remove the live USB/CD and reboot.')
-            GLib.idle_add(self._go, 6)
+            log('Remove the live USB/CD and click Reboot Now.')
+            GLib.idle_add(self._go, 7)
 
         except Exception as e:
             import traceback
