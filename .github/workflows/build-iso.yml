@@ -286,7 +286,10 @@ jobs:
           sudo chroot chroot apt-get install -y \
             parted testdisk gddrescue \
             rsync dosfstools ntfs-3g exfat-fuse \
-            squashfs-tools
+            squashfs-tools \
+            e2fsprogs \
+            xfsprogs \
+            fdisk
 
           # ── Containers & DevOps ───────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
