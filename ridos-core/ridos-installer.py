@@ -1171,7 +1171,6 @@ class Installer(Gtk.Window):
                     f'chroot {mnt} grub-install '
                     f'--target=x86_64-efi '
                     f'--efi-directory=/boot/efi '
-                    f'--boot-directory={mnt}/boot '
                     f'--bootloader-id=RIDOS-Core '
                     f'--recheck',
                     self._log, timeout=120)
@@ -1204,7 +1203,6 @@ class Installer(Gtk.Window):
                 rc = sh_log(
                     f'chroot {mnt} grub-install '
                     f'--target=i386-pc '
-                    f'--boot-directory={mnt}/boot '
                     f'--recheck {disk}',
                     self._log, timeout=120)
                 if rc == 0:
@@ -1229,6 +1227,20 @@ class Installer(Gtk.Window):
                 log('System may not boot. Continuing anyway...')
 
             # ── 10. update-grub with manual fallback ──────────────────────
+            # Create generic symlinks so GRUB can find the kernel
+            # update-grub may write 'vmlinuz' without version suffix;
+            # the actual files are vmlinuz-6.x.x-amd64 so we create
+            # both the versioned entries AND generic symlinks.
+            self._status('Preparing kernel symlinks...', 0.86)
+            log('Creating vmlinuz + initrd.img symlinks...')
+            sh(
+                f'cd {mnt}/boot && '
+                f'KERN=$(ls vmlinuz-* 2>/dev/null | sort -V | tail -1) && '
+                f'INIT=$(ls initrd.img-* 2>/dev/null | sort -V | tail -1) && '
+                f'[ -n "$KERN" ] && ln -sf "$KERN" vmlinuz || true && '
+                f'[ -n "$INIT" ] && ln -sf "$INIT" initrd.img || true')
+            log('Symlinks created.')
+
             self._status('Generating GRUB config...', 0.88)
             log('Running update-grub...')
             rc = sh_log(
