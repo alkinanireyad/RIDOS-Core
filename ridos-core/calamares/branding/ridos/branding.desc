@@ -1,1 +1,46 @@
+# RIDOS-Core — branding.desc
+# Place at: /etc/calamares/branding/ridos/branding.desc
+# Controls the look, feel, and text of the Calamares installer.
 
+---
+
+componentName: ridos
+
+# -----------------------------------------------------------------------
+# Strings shown throughout the installer UI
+# -----------------------------------------------------------------------
+strings:
+    productName:         "RIDOS-Core"
+    shortProductName:    "RIDOS"
+    version:             "1.0 Nova"
+    shortVersion:        "1.0"
+    versionedName:       "RIDOS-Core 1.0 Nova"
+    shortVersionedName:  "RIDOS 1.0"
+    bootloaderEntryName: "RIDOS-Core"
+    productUrl:          "https://ridos.example.com"
+    supportUrl:          "https://ridos.example.com/support"
+    knownIssuesUrl:      "https://ridos.example.com/known-issues"
+    releaseNotesUrl:     "https://ridos.example.com/release-notes"
+
+# -----------------------------------------------------------------------
+# Images (place these files in /etc/calamares/branding/ridos/)
+# -----------------------------------------------------------------------
+images:
+    productLogo:         "ridos-logo.png"       # 80x80 px PNG
+    productIcon:         "ridos-icon.png"       # 48x48 px PNG
+    productWelcome:      "ridos-welcome.png"    # 800x500 px PNG (shown on welcome page)
+
+# -----------------------------------------------------------------------
+# Slideshow shown during installation progress
+# -----------------------------------------------------------------------
+slideshow:               "show.qml"
+slideshowAPI:            2
+
+# -----------------------------------------------------------------------
+# Installer window style
+# -----------------------------------------------------------------------
+style:
+    sidebarBackground:   "#1a1a2e"     # Dark navy sidebar
+    sidebarText:         "#e0e0e0"     # Light text
+    sidebarTextSelect:   "#00d4aa"     # RIDOS accent color (teal)
+    sidebarTextHighlight:"#ffffff"
