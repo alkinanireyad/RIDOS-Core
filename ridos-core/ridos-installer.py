@@ -153,8 +153,21 @@ def write_minimal_grub_cfg(mnt, root_uuid):
     # Find actual kernel and initrd filenames
     kern_files = sorted(glob.glob(f'{mnt}/boot/vmlinuz-*'))
     init_files = sorted(glob.glob(f'{mnt}/boot/initrd.img-*'))
-    kern = '/boot/' + os.path.basename(kern_files[-1]) if kern_files else '/vmlinuz'
-    init = '/boot/' + os.path.basename(init_files[-1]) if init_files else '/initrd.img'
+    if kern_files:
+        kern = '/boot/' + os.path.basename(kern_files[-1])
+    elif os.path.exists(f'{mnt}/vmlinuz'):
+        kern = '/vmlinuz'
+    else:
+        raise RuntimeError(
+            'No kernel image found in installed system. '
+            'Please verify that /boot contains a vmlinuz-* file.')
+
+    if init_files:
+        init = '/boot/' + os.path.basename(init_files[-1])
+    elif os.path.exists(f'{mnt}/initrd.img'):
+        init = '/initrd.img'
+    else:
+        init = ''
 
     # Detect partition table type for correct insmod
     out, _, _ = sh(f'blkid -s PTTYPE -o value {mnt} 2>/dev/null || echo msdos')

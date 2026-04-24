@@ -305,9 +305,19 @@ write('/etc/calamares/modules/packages.conf',
     '  - remove:\n'
     '      - live-boot\n'
     '      - live-boot-initramfs-tools\n'
+    '  - install:\n'
+    '      - grub-pc\n'
+    '      - grub-efi-amd64\n'
+    '      - os-prober\n'
+    '      - linux-image-amd64\n'
+    '      - linux-headers-amd64\n'
+    '      - firmware-linux\n'
+    '      - firmware-linux-nonfree\n'
     '      - calamares\n'
-    '      - calamares-data\n'
+    '      - calamares-settings-debian\n'
 )
+# Keep Calamares installed so the installer remains available
+# in the installed system and the user can launch it again.
 
 print("[15/15] polkit rule + autostart ...")
 # polkit rule — lets ridos user run Calamares without password prompt
