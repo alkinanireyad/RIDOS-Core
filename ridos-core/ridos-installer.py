@@ -147,25 +147,38 @@ def get_timezones():
 
 # ── Minimal GRUB config fallback ──────────────────────────────────────────────
 def write_minimal_grub_cfg(mnt, root_uuid):
-    """Write a minimal working grub.cfg when update-grub fails."""
+    """Write a minimal working grub.cfg when update-grub fails.
+    Uses actual versioned kernel filename found in /boot."""
+    import glob
+    # Find actual kernel and initrd filenames
+    kern_files = sorted(glob.glob(f'{mnt}/boot/vmlinuz-*'))
+    init_files = sorted(glob.glob(f'{mnt}/boot/initrd.img-*'))
+    kern = '/boot/' + os.path.basename(kern_files[-1]) if kern_files else '/vmlinuz'
+    init = '/boot/' + os.path.basename(init_files[-1]) if init_files else '/initrd.img'
+
+    # Detect partition table type for correct insmod
+    out, _, _ = sh(f'blkid -s PTTYPE -o value {mnt} 2>/dev/null || echo msdos')
+    is_gpt = 'gpt' in out.lower()
+    part_mod = 'part_gpt' if is_gpt else 'part_msdos'
+
     cfg = f"""set default=0
 set timeout=5
 set timeout_style=menu
 
-insmod part_gpt
+insmod {part_mod}
 insmod ext2
 insmod all_video
 
 menuentry "RIDOS-Core 1.0 Nova" {{
     search --no-floppy --fs-uuid --set=root {root_uuid}
-    linux   /boot/vmlinuz root=UUID={root_uuid} ro quiet splash
-    initrd  /boot/initrd.img
+    linux   {kern} root=UUID={root_uuid} ro quiet splash
+    initrd  {init}
 }}
 
 menuentry "RIDOS-Core (recovery mode)" {{
     search --no-floppy --fs-uuid --set=root {root_uuid}
-    linux   /boot/vmlinuz root=UUID={root_uuid} ro single
-    initrd  /boot/initrd.img
+    linux   {kern} root=UUID={root_uuid} ro single
+    initrd  {init}
 }}
 """
     grub_dir = f'{mnt}/boot/grub'
@@ -1159,134 +1172,143 @@ class Installer(Gtk.Window):
                                'GRUB_DISABLE_OS_PROBER=false', c)
                 open(grub_def, 'w').write(c)
 
-            # ── 9. GRUB — proven Linux Mint / Debian method ─────────────
-            # Source: forums.linuxmint.com/viewtopic.php?t=320504
+            # ── 9. GRUB — definitive working approach ──────────────────
+            # Proven method from Ubuntu/Debian VirtualBox installations.
+            # ALL commands run inside chroot. grub-install needs a real
+            # running environment which chroot with proper bind mounts provides.
             #
-            # THE CORRECT SEQUENCE (what actually works):
-            #   Step A: grub-install from the LIVE SESSION using
-            #           --boot-directory=/mnt/ridos_target/boot
-            #           This uses the live system's grub tools which are
-            #           fully functional. Do NOT run grub-install inside
-            #           chroot — it often fails in live environments.
-            #
-            #   Step B: update-grub inside chroot
-            #           This generates grub.cfg with the correct paths.
-            #           The chroot sees the installed system's kernel files.
-            #
+            # CRITICAL: /proc /sys /dev MUST be mounted before this step.
+            # They were mounted in step 7 above.
             self._status('Installing GRUB...', 0.78)
             grub_ok = False
 
             if efi:
-                # ── UEFI: run grub-install from LIVE SESSION ──────────────
-                log('Installing GRUB EFI from live session...')
-                log(f'  grub-install --target=x86_64-efi')
-                log(f'  --efi-directory={mnt}/boot/efi')
-                log(f'  --boot-directory={mnt}/boot')
+                log('=== GRUB EFI Installation ===')
+                log('Installing grub-efi inside chroot...')
+                sh_log(
+                    f'DEBIAN_FRONTEND=noninteractive '
+                    f'chroot {mnt} apt-get install -y '
+                    f'--no-install-recommends '
+                    f'grub-efi-amd64 grub-efi-amd64-bin '
+                    f'grub-common grub2-common os-prober',
+                    self._log, timeout=300)
 
-                # Ensure grub-efi tools are available in live session
-                sh('apt-get install -y grub-efi-amd64-bin 2>/dev/null || true',
-                   timeout=60)
-
+                log(f'Running grub-install --target=x86_64-efi inside chroot...')
                 rc = sh_log(
-                    f'grub-install '
+                    f'chroot {mnt} grub-install '
                     f'--target=x86_64-efi '
-                    f'--efi-directory={mnt}/boot/efi '
-                    f'--boot-directory={mnt}/boot '
+                    f'--efi-directory=/boot/efi '
                     f'--bootloader-id=RIDOS-Core '
-                    f'--no-nvram '
                     f'--recheck',
                     self._log, timeout=120)
 
                 if rc == 0:
                     grub_ok = True
-                    log('grub-install EFI succeeded.')
+                    log('grub-install EFI: SUCCESS')
                 else:
-                    log(f'WARNING: grub-install EFI returned {rc}')
-                    log('Trying without --no-nvram...')
-                    rc2 = sh_log(
-                        f'grub-install '
-                        f'--target=x86_64-efi '
-                        f'--efi-directory={mnt}/boot/efi '
-                        f'--boot-directory={mnt}/boot '
-                        f'--bootloader-id=RIDOS-Core '
-                        f'--recheck',
-                        self._log, timeout=120)
-                    if rc2 == 0:
-                        grub_ok = True
-                        log('grub-install EFI (second attempt) succeeded.')
-                    else:
-                        log(f'WARNING: both EFI grub-install attempts returned errors')
-                        log('Continuing anyway — grub.cfg will be written manually')
+                    log(f'WARNING: grub-install returned {rc}, continuing...')
+                    grub_ok = False
+
             else:
-                # ── BIOS: run grub-install from LIVE SESSION ──────────────
-                log('Installing GRUB BIOS from live session...')
-                log(f'  grub-install --target=i386-pc')
-                log(f'  --boot-directory={mnt}/boot {disk}')
+                log('=== GRUB BIOS Installation (VirtualBox MBR mode) ===')
+                log('Step 1: Install grub-pc inside chroot...')
+                sh_log(
+                    f'DEBIAN_FRONTEND=noninteractive '
+                    f'chroot {mnt} apt-get install -y '
+                    f'--no-install-recommends '
+                    f'grub-pc grub-pc-bin '
+                    f'grub-common grub2-common os-prober',
+                    self._log, timeout=300)
 
-                # Ensure grub-pc tools available in live session
-                sh('apt-get install -y grub-pc-bin 2>/dev/null || true',
-                   timeout=60)
-
+                log(f'Step 2: grub-install --target=i386-pc {disk} inside chroot...')
                 rc = sh_log(
-                    f'grub-install '
+                    f'chroot {mnt} grub-install '
                     f'--target=i386-pc '
-                    f'--boot-directory={mnt}/boot '
                     f'--recheck '
                     f'{disk}',
                     self._log, timeout=120)
 
                 if rc == 0:
                     grub_ok = True
-                    log('grub-install BIOS succeeded.')
+                    log('grub-install BIOS: SUCCESS')
                 else:
-                    log(f'WARNING: grub-install BIOS returned {rc}')
-                    grub_ok = False
+                    log(f'WARNING: chroot grub-install returned {rc}')
+                    log('Trying grub-install from live session as fallback...')
+                    rc2 = sh_log(
+                        f'grub-install '
+                        f'--target=i386-pc '
+                        f'--boot-directory={mnt}/boot '
+                        f'--recheck '
+                        f'{disk}',
+                        self._log, timeout=120)
+                    if rc2 == 0:
+                        grub_ok = True
+                        log('Fallback grub-install: SUCCESS')
+                    else:
+                        log(f'Both grub-install attempts failed (rc={rc},{rc2})')
+                        grub_ok = False
 
-            # ── 10. update-grub INSIDE chroot ─────────────────────────────
-            # update-grub runs inside the installed system so it sees the
-            # real kernel files in /boot and writes correct grub.cfg paths.
-            self._status('Creating kernel symlinks + generating grub.cfg...', 0.86)
-
-            # Create /vmlinuz and /initrd.img symlinks at ROOT of installed
-            # system. grub-mkconfig reads these to find the kernel.
-            log('Creating /vmlinuz → /boot/vmlinuz-* symlinks...')
+            # ── 10. Create kernel symlinks + update-grub ──────────────────
+            # Create /vmlinuz -> boot/vmlinuz-* at root of installed system.
+            # grub-mkconfig reads these symlinks to build grub.cfg.
+            self._status('Creating kernel symlinks...', 0.85)
+            log('Creating /vmlinuz and /initrd.img symlinks...')
             out_kern, _, _ = sh(
                 f'ls {mnt}/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1')
             out_init, _, _ = sh(
                 f'ls {mnt}/boot/initrd.img-* 2>/dev/null | sort -V | tail -1')
+
             if out_kern.strip():
                 kern_base = os.path.basename(out_kern.strip())
-                init_base = os.path.basename(out_init.strip()) if out_init.strip() else ''
+                init_base = os.path.basename(out_init.strip())                             if out_init.strip() else ''
                 sh(f'ln -sf boot/{kern_base} {mnt}/vmlinuz')
                 sh(f'ln -sf boot/{kern_base} {mnt}/vmlinuz.old 2>/dev/null || true')
                 if init_base:
                     sh(f'ln -sf boot/{init_base} {mnt}/initrd.img')
-                    sh(f'ln -sf boot/{init_base} {mnt}/initrd.img.old 2>/dev/null || true')
-                log(f'  /vmlinuz -> boot/{kern_base}')
+                    sh(f'ln -sf boot/{init_base} '
+                       f'{mnt}/initrd.img.old 2>/dev/null || true')
+                log(f'  /vmlinuz    -> boot/{kern_base}')
                 log(f'  /initrd.img -> boot/{init_base}')
             else:
-                log('WARNING: no vmlinuz-* found in /boot')
+                log('WARNING: no vmlinuz-* found in /boot — symlinks skipped')
 
-            # Run update-grub inside chroot
-            self._status('Running update-grub inside chroot...', 0.88)
-            log('Running update-grub...')
+            # Set GRUB_DISABLE_OS_PROBER
+            grub_def = f'{mnt}/etc/default/grub'
+            if os.path.exists(grub_def):
+                c = open(grub_def).read()
+                if 'GRUB_DISABLE_OS_PROBER' not in c:
+                    c += '\nGRUB_DISABLE_OS_PROBER=false\n'
+                open(grub_def, 'w').write(c)
+
+            self._status('Running update-grub...', 0.88)
+            log('Running update-grub inside chroot...')
             rc = sh_log(
                 f'chroot {mnt} update-grub',
                 self._log, timeout=120)
 
-            if rc != 0:
-                log(f'update-grub returned {rc} — writing minimal grub.cfg as fallback')
+            if rc == 0:
+                log('update-grub: SUCCESS')
+                # Verify grub.cfg was written and contains kernel path
+                cfg_path = f'{mnt}/boot/grub/grub.cfg'
+                if os.path.exists(cfg_path):
+                    cfg = open(cfg_path).read()
+                    if 'vmlinuz' in cfg:
+                        log('grub.cfg: kernel entry found ✓')
+                    else:
+                        log('WARNING: grub.cfg exists but no vmlinuz entry')
+                        log('Writing minimal grub.cfg as safety net...')
+                        write_minimal_grub_cfg(mnt, root_uuid.strip())
+                else:
+                    log('WARNING: grub.cfg not found, writing minimal version...')
+                    write_minimal_grub_cfg(mnt, root_uuid.strip())
+            else:
+                log(f'update-grub returned {rc}')
+                log('Writing minimal grub.cfg as fallback...')
                 try:
                     write_minimal_grub_cfg(mnt, root_uuid.strip())
                     log('Minimal grub.cfg written.')
                 except Exception as ex:
-                    log(f'Could not write fallback grub.cfg: {ex}')
-            else:
-                log('update-grub completed successfully.')
-
-            if not grub_ok:
-                log('NOTE: grub-install had warnings but grub.cfg was generated.')
-                log('The system may still boot correctly.')
+                    log(f'ERROR writing grub.cfg: {ex}')
 
             # ── 11. Remove live packages ──────────────────────────────────
             self._status('Removing live packages...', 0.93)
