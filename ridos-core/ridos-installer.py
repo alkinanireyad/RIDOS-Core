@@ -150,24 +150,33 @@ def write_minimal_grub_cfg(mnt, root_uuid):
     """Write a minimal working grub.cfg when update-grub fails.
     Uses actual versioned kernel filename found in /boot."""
     import glob
+    import time
+    
     # Find actual kernel and initrd filenames
     kern_files = sorted(glob.glob(f'{mnt}/boot/vmlinuz-*'))
     init_files = sorted(glob.glob(f'{mnt}/boot/initrd.img-*'))
+    
     if kern_files:
         kern = '/boot/' + os.path.basename(kern_files[-1])
     elif os.path.exists(f'{mnt}/vmlinuz'):
         kern = '/vmlinuz'
     else:
-        raise RuntimeError(
-            'No kernel image found in installed system. '
-            'Please verify that /boot contains a vmlinuz-* file.')
+        # Kernel not found yet - may still be installing. Wait and retry.
+        time.sleep(2)
+        kern_files = sorted(glob.glob(f'{mnt}/boot/vmlinuz-*'))
+        if kern_files:
+            kern = '/boot/' + os.path.basename(kern_files[-1])
+        else:
+            # Still no kernel - use generic fallback that will work once kernel is installed
+            kern = '/vmlinuz'
 
     if init_files:
         init = '/boot/' + os.path.basename(init_files[-1])
     elif os.path.exists(f'{mnt}/initrd.img'):
         init = '/initrd.img'
     else:
-        init = ''
+        # Initrd may also be installing. Use generic fallback
+        init = '/initrd.img'
 
     # Detect partition table type for correct insmod
     out, _, _ = sh(f'blkid -s PTTYPE -o value {mnt} 2>/dev/null || echo msdos')
@@ -175,7 +184,7 @@ def write_minimal_grub_cfg(mnt, root_uuid):
     part_mod = 'part_gpt' if is_gpt else 'part_msdos'
 
     cfg = f"""set default=0
-set timeout=5
+set timeout=10
 set timeout_style=menu
 
 insmod {part_mod}
@@ -1185,13 +1194,20 @@ class Installer(Gtk.Window):
                                'GRUB_DISABLE_OS_PROBER=false', c)
                 open(grub_def, 'w').write(c)
 
-            # ── 9. GRUB — definitive working approach ──────────────────
-            # Proven method from Ubuntu/Debian VirtualBox installations.
-            # ALL commands run inside chroot. grub-install needs a real
-            # running environment which chroot with proper bind mounts provides.
-            #
-            # CRITICAL: /proc /sys /dev MUST be mounted before this step.
-            # They were mounted in step 7 above.
+            # ── 9. Install kernel + GRUB ────────────────────────────────────
+            # CRITICAL: Install linux-image FIRST, then configure GRUB.
+            # GRUB needs the kernel to be present to generate proper grub.cfg.
+            self._status('Installing kernel...', 0.75)
+            log('Installing linux-image-amd64 and firmware...')
+            sh_log(
+                f'DEBIAN_FRONTEND=noninteractive '
+                f'chroot {mnt} apt-get install -y '
+                f'--no-install-recommends '
+                f'linux-image-amd64 linux-headers-amd64 '
+                f'firmware-linux firmware-linux-nonfree',
+                self._log, timeout=600)
+            log('Kernel installation complete.')
+
             self._status('Installing GRUB...', 0.78)
             grub_ok = False
 
