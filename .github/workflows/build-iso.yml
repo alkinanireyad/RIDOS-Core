@@ -34,6 +34,7 @@ jobs:
             "ridos-core/ridos-help.py" \
             "ridos-core/welcome-app.py" \
             "ridos-core/ridos_shell.py" \
+            "ridos-core/ridos-installer-gui.py" \
             "ridos-core/calamares/settings.conf" \
             "ridos-core/calamares/modules/unpackfs.conf" \
             "ridos-core/calamares/modules/bootloader.conf" \
@@ -127,7 +128,17 @@ jobs:
             parted gparted squashfs-tools \
             dkms build-essential
 
-          # ── Calamares GUI installer ───────────────────────────────────────
+          # ── RIDOS Native Installer dependencies (GTK4 + Python) ───────────
+          sudo chroot chroot apt-get install -y \
+            python3-gi python3-gi-cairo \
+            gir1.2-gtk-4.0 gir1.2-adw-1 \
+            gir1.2-pango-1.0 \
+            libgtk-4-1 libadwaita-1-0 \
+            polkit pkexec \
+            rsync \
+            --no-install-recommends || true
+
+          # ── Calamares GUI installer (fallback option) ─────────────────────
           sudo chroot chroot apt-get install -y \
             calamares \
             calamares-settings-debian \
@@ -393,55 +404,23 @@ jobs:
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
 
-
-      - name: Install Calamares config
+      - name: Deploy RIDOS Native Installer
         run: |
-          echo "=== Installing Calamares config into chroot ==="
+          echo "=== Deploying RIDOS Native Installer ==="
 
-          # Create required directories inside chroot
+          # ── Destination directories ───────────────────────────────────────
+          sudo mkdir -p chroot/opt/ridos-core/bin
+          sudo mkdir -p chroot/opt/ridos-core/assets
+          sudo mkdir -p chroot/usr/share/applications
           sudo mkdir -p chroot/etc/calamares/modules
           sudo mkdir -p chroot/etc/calamares/branding/ridos
 
-          # Copy main settings
-          sudo cp ridos-core/calamares/settings.conf \
-            chroot/etc/calamares/settings.conf
+          # ── Copy native GTK4 installer ────────────────────────────────────
+          sudo cp ridos-core/ridos-installer-gui.py \
+            chroot/opt/ridos-core/bin/ridos-installer-gui.py
+          sudo chmod +x chroot/opt/ridos-core/bin/ridos-installer-gui.py
 
-          # Copy all module configs
-          for f in unpackfs bootloader partition users packages \
-                   removeuser locale welcome; do
-            sudo cp ridos-core/calamares/modules/${f}.conf \
-              chroot/etc/calamares/modules/${f}.conf
-          done
-
-          # Copy branding files
-          sudo cp ridos-core/calamares/branding/ridos/branding.desc \
-            chroot/etc/calamares/branding/ridos/branding.desc
-          sudo cp ridos-core/calamares/branding/ridos/show.qml \
-            chroot/etc/calamares/branding/ridos/show.qml
-
-          # Copy branding images if they exist
-          for img in ridos-logo.png ridos-icon.png ridos-welcome.png; do
-            if [ -f "ridos-core/calamares/branding/ridos/$img" ]; then
-              sudo cp ridos-core/calamares/branding/ridos/$img \
-                chroot/etc/calamares/branding/ridos/$img
-            else
-              echo "WARNING: $img not found — installer will work but logo will be missing"
-            fi
-          done
-
-          # Fix unpackfs path — squashfs is at /run/live/medium/live/ in a live session
-          # This matches the iso/live/filesystem.squashfs layout built in this workflow
-          sudo sed -i \
-            's|source:.*filesystem.squashfs|source: /run/live/medium/live/filesystem.squashfs|' \
-            chroot/etc/calamares/modules/unpackfs.conf
-
-          # Fix removeuser — live username in RIDOS is "ridos" not "user"
-          sudo sed -i \
-            's|username: user|username: ridos|' \
-            chroot/etc/calamares/modules/removeuser.conf
-
-          # Create desktop launcher so user can click to install from GNOME
-          sudo mkdir -p chroot/usr/share/applications
+          # ── Desktop launcher for native installer ─────────────────────────
           sudo tee chroot/usr/share/applications/ridos-installer.desktop > /dev/null << 'DESKTOP'
 [Desktop Entry]
 Version=1.0
@@ -449,21 +428,81 @@ Type=Application
 Name=Install RIDOS-Core
 GenericName=System Installer
 Comment=Install RIDOS-Core 1.0 Nova to your computer
-Exec=pkexec calamares
-Icon=/etc/calamares/branding/ridos/ridos-icon.png
+Exec=pkexec python3 /opt/ridos-core/bin/ridos-installer-gui.py
+Icon=/opt/ridos-core/assets/ridos-icon.png
 Terminal=false
 Categories=System;
-Keywords=install;setup;
+Keywords=install;setup;ridos;
+StartupNotify=true
 DESKTOP
 
-          echo "=== Verifying Calamares config ==="
-          echo "--- /etc/calamares/ ---"
+          # ── Copy Calamares config files ───────────────────────────────────
+          sudo cp ridos-core/calamares/settings.conf \
+            chroot/etc/calamares/settings.conf
+
+          for f in unpackfs bootloader partition users packages \
+                   removeuser locale welcome; do
+            sudo cp ridos-core/calamares/modules/${f}.conf \
+              chroot/etc/calamares/modules/${f}.conf
+          done
+
+          sudo cp ridos-core/calamares/branding/ridos/branding.desc \
+            chroot/etc/calamares/branding/ridos/branding.desc
+          sudo cp ridos-core/calamares/branding/ridos/show.qml \
+            chroot/etc/calamares/branding/ridos/show.qml
+
+          # Copy branding images if present
+          for img in ridos-logo.png ridos-icon.png ridos-welcome.png; do
+            if [ -f "ridos-core/calamares/branding/ridos/$img" ]; then
+              sudo cp ridos-core/calamares/branding/ridos/$img \
+                chroot/etc/calamares/branding/ridos/$img
+              sudo cp ridos-core/calamares/branding/ridos/$img \
+                chroot/opt/ridos-core/assets/$img 2>/dev/null || true
+            fi
+          done
+
+          # ── Fix squashfs path for live session ────────────────────────────
+          # In a live session the squashfs is at /run/live/medium/live/
+          # which matches iso/live/filesystem.squashfs built in this workflow
+          sudo sed -i \
+            's|source:.*filesystem.squashfs|source: /run/live/medium/live/filesystem.squashfs|' \
+            chroot/etc/calamares/modules/unpackfs.conf
+
+          # ── Fix live username — RIDOS live user is "ridos" ────────────────
+          sudo sed -i \
+            's|username: user|username: ridos|' \
+            chroot/etc/calamares/modules/removeuser.conf
+
+          # ── Polkit rule so pkexec can launch installer without password ───
+          sudo mkdir -p chroot/usr/share/polkit-1/actions
+          sudo tee chroot/usr/share/polkit-1/actions/com.ridos.installer.policy > /dev/null << 'POLKIT'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="com.ridos.installer">
+    <description>Run RIDOS-Core Installer</description>
+    <message>Authentication required to install RIDOS-Core</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
+POLKIT
+
+          # ── Verify everything is in place ─────────────────────────────────
+          echo "--- Native installer ---"
+          ls -lh chroot/opt/ridos-core/bin/
+          echo "--- Desktop launcher ---"
+          ls -lh chroot/usr/share/applications/ridos-installer.desktop
+          echo "--- Calamares config ---"
           ls chroot/etc/calamares/
-          echo "--- /etc/calamares/modules/ ---"
           ls chroot/etc/calamares/modules/
-          echo "--- /etc/calamares/branding/ridos/ ---"
           ls chroot/etc/calamares/branding/ridos/
-          echo "Calamares config installed successfully"
+          echo "=== Installer deployment complete ==="
 
       # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
       # Skips gracefully if source files are not in the repo.
