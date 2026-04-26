@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Install RIDOS-Core
+GenericName=System Installer
+Comment=Install RIDOS-Core 1.0 Nova to your computer
+Exec=pkexec python3 /opt/ridos-core/bin/ridos-installer-gui.py
+Icon=/opt/ridos-core/assets/ridos-icon.png
+Terminal=false
+Categories=System;
+Keywords=install;setup;ridos;
+StartupNotify=true
