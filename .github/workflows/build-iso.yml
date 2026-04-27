@@ -34,18 +34,6 @@ jobs:
             "ridos-core/ridos-help.py" \
             "ridos-core/welcome-app.py" \
             "ridos-core/ridos_shell.py" \
-            "ridos-core/ridos-installer-gui.py" \
-            "ridos-core/calamares/settings.conf" \
-            "ridos-core/calamares/modules/unpackfs.conf" \
-            "ridos-core/calamares/modules/bootloader.conf" \
-            "ridos-core/calamares/modules/partition.conf" \
-            "ridos-core/calamares/modules/users.conf" \
-            "ridos-core/calamares/modules/packages.conf" \
-            "ridos-core/calamares/modules/removeuser.conf" \
-            "ridos-core/calamares/modules/locale.conf" \
-            "ridos-core/calamares/modules/welcome.conf" \
-            "ridos-core/calamares/branding/ridos/branding.desc" \
-            "ridos-core/calamares/branding/ridos/show.qml" \
             "build-system/scripts/configure-system.py" \
             "build-system/scripts/apply-branding.py" \
             "build-system/scripts/write-grub-config.py" \
@@ -127,27 +115,6 @@ jobs:
             policykit-1-gnome apt-transport-https ca-certificates \
             parted gparted squashfs-tools \
             dkms build-essential
-
-          # ── RIDOS Native Installer dependencies (GTK4 + Python) ───────────
-          sudo chroot chroot apt-get install -y \
-            python3-gi python3-gi-cairo \
-            gir1.2-gtk-4.0 gir1.2-adw-1 \
-            gir1.2-pango-1.0 \
-            libgtk-4-1 libadwaita-1-0 \
-            polkit pkexec \
-            rsync \
-            --no-install-recommends || true
-
-          # ── Calamares GUI installer (fallback option) ─────────────────────
-          sudo chroot chroot apt-get install -y \
-            calamares \
-            calamares-settings-debian \
-            qml-module-qtquick2 \
-            qml-module-qtquick-controls \
-            qml-module-qtquick-controls2 \
-            qml-module-qtquick-layouts \
-            python3-yaml \
-            --no-install-recommends || true
 
           sudo chroot chroot apt-get install -y grub-pc        || true
           sudo chroot chroot apt-get install -y grub-efi-amd64 || true
@@ -404,106 +371,6 @@ jobs:
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
 
-      - name: Deploy RIDOS Native Installer
-        run: |
-          echo "=== Deploying RIDOS Native Installer ==="
-
-          # ── Destination directories ───────────────────────────────────────
-          sudo mkdir -p chroot/opt/ridos-core/bin
-          sudo mkdir -p chroot/opt/ridos-core/assets
-          sudo mkdir -p chroot/usr/share/applications
-          sudo mkdir -p chroot/etc/calamares/modules
-          sudo mkdir -p chroot/etc/calamares/branding/ridos
-
-          # ── Copy native GTK4 installer ────────────────────────────────────
-          sudo cp ridos-core/ridos-installer-gui.py \
-            chroot/opt/ridos-core/bin/ridos-installer-gui.py
-          sudo chmod +x chroot/opt/ridos-core/bin/ridos-installer-gui.py
-
-          # ── Desktop launcher for native installer ─────────────────────────
-          sudo tee chroot/usr/share/applications/ridos-installer.desktop > /dev/null << 'DESKTOP'
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=Install RIDOS-Core
-GenericName=System Installer
-Comment=Install RIDOS-Core 1.0 Nova to your computer
-Exec=pkexec python3 /opt/ridos-core/bin/ridos-installer-gui.py
-Icon=/opt/ridos-core/assets/ridos-icon.png
-Terminal=false
-Categories=System;
-Keywords=install;setup;ridos;
-StartupNotify=true
-DESKTOP
-
-          # ── Copy Calamares config files ───────────────────────────────────
-          sudo cp ridos-core/calamares/settings.conf \
-            chroot/etc/calamares/settings.conf
-
-          for f in unpackfs bootloader partition users packages \
-                   removeuser locale welcome; do
-            sudo cp ridos-core/calamares/modules/${f}.conf \
-              chroot/etc/calamares/modules/${f}.conf
-          done
-
-          sudo cp ridos-core/calamares/branding/ridos/branding.desc \
-            chroot/etc/calamares/branding/ridos/branding.desc
-          sudo cp ridos-core/calamares/branding/ridos/show.qml \
-            chroot/etc/calamares/branding/ridos/show.qml
-
-          # Copy branding images if present
-          for img in ridos-logo.png ridos-icon.png ridos-welcome.png; do
-            if [ -f "ridos-core/calamares/branding/ridos/$img" ]; then
-              sudo cp ridos-core/calamares/branding/ridos/$img \
-                chroot/etc/calamares/branding/ridos/$img
-              sudo cp ridos-core/calamares/branding/ridos/$img \
-                chroot/opt/ridos-core/assets/$img 2>/dev/null || true
-            fi
-          done
-
-          # ── Fix squashfs path for live session ────────────────────────────
-          # In a live session the squashfs is at /run/live/medium/live/
-          # which matches iso/live/filesystem.squashfs built in this workflow
-          sudo sed -i \
-            's|source:.*filesystem.squashfs|source: /run/live/medium/live/filesystem.squashfs|' \
-            chroot/etc/calamares/modules/unpackfs.conf
-
-          # ── Fix live username — RIDOS live user is "ridos" ────────────────
-          sudo sed -i \
-            's|username: user|username: ridos|' \
-            chroot/etc/calamares/modules/removeuser.conf
-
-          # ── Polkit rule so pkexec can launch installer without password ───
-          sudo mkdir -p chroot/usr/share/polkit-1/actions
-          sudo tee chroot/usr/share/polkit-1/actions/com.ridos.installer.policy > /dev/null << 'POLKIT'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE policyconfig PUBLIC
-  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
-  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
-<policyconfig>
-  <action id="com.ridos.installer">
-    <description>Run RIDOS-Core Installer</description>
-    <message>Authentication required to install RIDOS-Core</message>
-    <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>yes</allow_active>
-    </defaults>
-  </action>
-</policyconfig>
-POLKIT
-
-          # ── Verify everything is in place ─────────────────────────────────
-          echo "--- Native installer ---"
-          ls -lh chroot/opt/ridos-core/bin/
-          echo "--- Desktop launcher ---"
-          ls -lh chroot/usr/share/applications/ridos-installer.desktop
-          echo "--- Calamares config ---"
-          ls chroot/etc/calamares/
-          ls chroot/etc/calamares/modules/
-          ls chroot/etc/calamares/branding/ridos/
-          echo "=== Installer deployment complete ==="
-
       # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
       # Skips gracefully if source files are not in the repo.
       # Adds ~20 min to build time. Binary ends up at:
@@ -524,23 +391,50 @@ POLKIT
 
       - name: Build squashfs filesystem
         run: |
+          # IMPORTANT: Do NOT exclude /boot — the installer needs
+          # the kernel and initrd inside the squashfs to install them
+          # onto the target disk. Excluding /boot was causing
+          # "file /vmlinuz not found" after installation.
           sudo mksquashfs chroot filesystem.squashfs \
-            -comp zstd -Xcompression-level 15 -e boot -noappend
+            -comp zstd -Xcompression-level 15 -noappend \
+            -e proc -e sys -e dev -e run -e tmp -e media
           echo "squashfs size: $(du -sh filesystem.squashfs | cut -f1)"
+          echo "=== Verifying kernel is inside squashfs ==="
+          sudo unsquashfs -l filesystem.squashfs | grep vmlinuz | head -5 || \
+            echo "WARNING: no vmlinuz found in squashfs"
 
       - name: Prepare ISO structure
         run: |
           mkdir -p iso/live iso/boot/grub
-          cp filesystem.squashfs iso/live/
+
+          # Verify kernel exists in chroot before continuing
           KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
           INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
           if [ -z "$KERNEL" ] || [ -z "$INITRD" ]; then
             echo "ERROR: kernel or initrd not found in chroot/boot/"
-            ls chroot/boot/ || true
+            echo "Contents of chroot/boot/:"
+            ls -la chroot/boot/ || true
             exit 1
           fi
+          echo "Kernel : $KERNEL"
+          echo "Initrd : $INITRD"
+
+          # Copy squashfs (which now includes /boot with kernel inside)
+          cp filesystem.squashfs iso/live/
+
+          # Copy kernel and initrd to iso/live/ for the live boot menu
+          # (These are used by GRUB to boot the live session)
           cp "$KERNEL" iso/live/vmlinuz
           cp "$INITRD" iso/live/initrd
+
+          # Also ensure kernel symlinks exist at chroot root
+          # (needed by grub-mkconfig inside the installer)
+          KERN_BASE=$(basename "$KERNEL")
+          INIT_BASE=$(basename "$INITRD")
+          [ -L chroot/vmlinuz ]    || sudo ln -sf boot/$KERN_BASE chroot/vmlinuz
+          [ -L chroot/initrd.img ] || sudo ln -sf boot/$INIT_BASE chroot/initrd.img
+          echo "Symlinks: /vmlinuz -> boot/$KERN_BASE"
+
           python3 build-system/scripts/write-grub-config.py
           echo "ISO structure ready — kernel: $KERNEL"
 
