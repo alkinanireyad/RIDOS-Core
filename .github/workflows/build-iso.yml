@@ -371,6 +371,64 @@ jobs:
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
 
+      # ── Verify critical files are in chroot before building squashfs ──────
+      - name: Verify chroot integrity
+        run: |
+          echo "=== Verifying critical files in chroot ==="
+          FAIL=0
+
+          # 1. Installer must be present
+          if [ -f "chroot/opt/ridos-core/bin/ridos-installer.py" ]; then
+            echo "  OK : ridos-installer.py"
+          else
+            echo "  MISSING: ridos-installer.py — upload it to ridos-core/ in repo"
+            FAIL=1
+          fi
+
+          # 2. unsquashfs must be present (installer uses it to copy filesystem)
+          if chroot chroot which unsquashfs > /dev/null 2>&1; then
+            echo "  OK : unsquashfs ($(chroot chroot which unsquashfs))"
+          else
+            echo "  MISSING: unsquashfs — installing squashfs-tools..."
+            sudo mount --bind /dev  chroot/dev
+            sudo mount --bind /proc chroot/proc
+            sudo mount --bind /sys  chroot/sys
+            sudo chroot chroot apt-get install -y squashfs-tools
+            sudo umount chroot/sys chroot/proc chroot/dev || true
+          fi
+
+          # 3. Python3 + GTK must be present (installer runtime dependency)
+          if chroot chroot python3 -c "import gi" > /dev/null 2>&1; then
+            echo "  OK : python3 + gi (GTK)"
+          else
+            echo "  WARNING: python3-gi not found — installer may fail"
+          fi
+
+          # 4. grub-install must be present
+          if chroot chroot which grub-install > /dev/null 2>&1; then
+            echo "  OK : grub-install"
+          else
+            echo "  MISSING: grub-install — GRUB installation will fail!"
+            FAIL=1
+          fi
+
+          # 5. Kernel must be present
+          KERN=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
+          if [ -n "$KERN" ]; then
+            echo "  OK : kernel: $KERN"
+          else
+            echo "  MISSING: no kernel in chroot/boot/ !"
+            FAIL=1
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "ERROR: Critical files missing from chroot. Aborting build."
+            exit 1
+          fi
+          echo ""
+          echo "Chroot integrity check passed."
+
       # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
       # Skips gracefully if source files are not in the repo.
       # Adds ~20 min to build time. Binary ends up at:
@@ -389,52 +447,52 @@ jobs:
             echo "and build-system/scripts/build-ridos-welcome.sh to your repo."
           fi
 
+      # ── CRITICAL: Force unmount ALL bind mounts before mksquashfs ───────────
+      # If any previous step left bind mounts active (e.g. Rust build failed),
+      # mksquashfs would compress /dev /proc /sys causing kernel panic on boot.
+      - name: Force unmount chroot before squashfs
+        run: |
+          echo "=== Releasing any remaining chroot mounts ==="
+          for dir in dev/pts dev proc sys run boot/efi; do
+            sudo umount -l chroot/$dir 2>/dev/null || true
+          done
+          echo "=== Verifying no active mounts remain ==="
+          if mount | grep -q "$(pwd)/chroot"; then
+            echo "WARNING: some mounts still active:"
+            mount | grep "$(pwd)/chroot"
+            echo "Force unmounting..."
+            mount | grep "$(pwd)/chroot" | awk '{print $3}' |               xargs -I{} sudo umount -l {} 2>/dev/null || true
+          else
+            echo "Clean: no active chroot mounts."
+          fi
+
       - name: Build squashfs filesystem
         run: |
-          # IMPORTANT: Do NOT exclude /boot — the installer needs
-          # the kernel and initrd inside the squashfs to install them
-          # onto the target disk. Excluding /boot was causing
-          # "file /vmlinuz not found" after installation.
           sudo mksquashfs chroot filesystem.squashfs \
-            -comp zstd -Xcompression-level 15 -noappend \
-            -e proc -e sys -e dev -e run -e tmp -e media
+            -comp zstd -Xcompression-level 15 -e boot -noappend
           echo "squashfs size: $(du -sh filesystem.squashfs | cut -f1)"
-          echo "=== Verifying kernel is inside squashfs ==="
-          sudo unsquashfs -l filesystem.squashfs | grep vmlinuz | head -5 || \
-            echo "WARNING: no vmlinuz found in squashfs"
+          # Verify squashfs is large enough to be valid
+          SIZE_MB=$(du -m filesystem.squashfs | cut -f1)
+          echo "squashfs size in MB: $SIZE_MB"
+          if [ "$SIZE_MB" -lt 1000 ]; then
+            echo "ERROR: squashfs is too small ($SIZE_MB MB) - expected 2000+ MB"
+            exit 1
+          fi
+          echo "squashfs size OK."
 
       - name: Prepare ISO structure
         run: |
           mkdir -p iso/live iso/boot/grub
-
-          # Verify kernel exists in chroot before continuing
+          cp filesystem.squashfs iso/live/
           KERNEL=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
           INITRD=$(ls chroot/boot/initrd.img-* 2>/dev/null | sort -V | tail -1)
           if [ -z "$KERNEL" ] || [ -z "$INITRD" ]; then
             echo "ERROR: kernel or initrd not found in chroot/boot/"
-            echo "Contents of chroot/boot/:"
-            ls -la chroot/boot/ || true
+            ls chroot/boot/ || true
             exit 1
           fi
-          echo "Kernel : $KERNEL"
-          echo "Initrd : $INITRD"
-
-          # Copy squashfs (which now includes /boot with kernel inside)
-          cp filesystem.squashfs iso/live/
-
-          # Copy kernel and initrd to iso/live/ for the live boot menu
-          # (These are used by GRUB to boot the live session)
           cp "$KERNEL" iso/live/vmlinuz
           cp "$INITRD" iso/live/initrd
-
-          # Also ensure kernel symlinks exist at chroot root
-          # (needed by grub-mkconfig inside the installer)
-          KERN_BASE=$(basename "$KERNEL")
-          INIT_BASE=$(basename "$INITRD")
-          [ -L chroot/vmlinuz ]    || sudo ln -sf boot/$KERN_BASE chroot/vmlinuz
-          [ -L chroot/initrd.img ] || sudo ln -sf boot/$INIT_BASE chroot/initrd.img
-          echo "Symlinks: /vmlinuz -> boot/$KERN_BASE"
-
           python3 build-system/scripts/write-grub-config.py
           echo "ISO structure ready — kernel: $KERNEL"
 
