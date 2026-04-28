@@ -19,7 +19,7 @@ on:
 jobs:
   build-iso:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
+    timeout-minutes: 240
 
     steps:
       - name: Checkout source
@@ -286,7 +286,10 @@ jobs:
           sudo chroot chroot apt-get install -y \
             parted testdisk gddrescue \
             rsync dosfstools ntfs-3g exfat-fuse \
-            squashfs-tools
+            squashfs-tools \
+            e2fsprogs \
+            xfsprogs \
+            fdisk
 
           # ── Containers & DevOps ───────────────────────────────────────────
           sudo chroot chroot apt-get install -y \
@@ -369,15 +372,40 @@ jobs:
           sudo bash build-system/scripts/install-ridos-files.sh
 
       # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
+      # Skips gracefully if source files are not in the repo.
+      # Adds ~20 min to build time. Binary ends up at:
+      # /opt/ridos-core/bin/ridos-welcome
       - name: Build ridos-welcome (Rust + GTK4)
         run: |
           if [ -f "build-system/scripts/build-ridos-welcome.sh" ] && \
-             [ -f "ridos-welcome/Cargo.toml" ]; then
+             [ -f "ridos-welcome/Cargo.toml" ] && \
+             [ -f "ridos-welcome/src/main.rs" ]; then
+            echo "Building Rust welcome app..."
             chmod +x build-system/scripts/build-ridos-welcome.sh
             sudo bash build-system/scripts/build-ridos-welcome.sh
           else
-            echo "WARNING: ridos-welcome source not found — skipping Rust build"
-            echo "Add ridos-welcome/Cargo.toml and ridos-welcome/src/main.rs to repo"
+            echo "INFO: ridos-welcome source not found — skipping Rust build."
+            echo "To enable: add ridos-welcome/Cargo.toml and ridos-welcome/src/main.rs"
+            echo "and build-system/scripts/build-ridos-welcome.sh to your repo."
+          fi
+
+      # ── CRITICAL: Force unmount ALL bind mounts before mksquashfs ───────────
+      # If any previous step left bind mounts active (e.g. Rust build failed),
+      # mksquashfs would compress /dev /proc /sys causing kernel panic on boot.
+      - name: Force unmount chroot before squashfs
+        run: |
+          echo "=== Releasing any remaining chroot mounts ==="
+          for dir in dev/pts dev proc sys run boot/efi; do
+            sudo umount -l chroot/$dir 2>/dev/null || true
+          done
+          echo "=== Verifying no active mounts remain ==="
+          if mount | grep -q "$(pwd)/chroot"; then
+            echo "WARNING: some mounts still active:"
+            mount | grep "$(pwd)/chroot"
+            echo "Force unmounting..."
+            mount | grep "$(pwd)/chroot" | awk '{print $3}' |               xargs -I{} sudo umount -l {} 2>/dev/null || true
+          else
+            echo "Clean: no active chroot mounts."
           fi
 
       - name: Build squashfs filesystem
@@ -385,6 +413,14 @@ jobs:
           sudo mksquashfs chroot filesystem.squashfs \
             -comp zstd -Xcompression-level 15 -e boot -noappend
           echo "squashfs size: $(du -sh filesystem.squashfs | cut -f1)"
+          # Verify squashfs is large enough to be valid
+          SIZE_MB=$(du -m filesystem.squashfs | cut -f1)
+          echo "squashfs size in MB: $SIZE_MB"
+          if [ "$SIZE_MB" -lt 500 ]; then
+            echo "ERROR: squashfs is too small ($SIZE_MB MB) - build likely failed"
+            exit 1
+          fi
+          echo "squashfs size OK."
 
       - name: Prepare ISO structure
         run: |
