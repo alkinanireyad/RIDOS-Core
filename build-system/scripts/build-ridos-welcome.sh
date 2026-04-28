@@ -5,6 +5,9 @@
 # Called by     : sudo bash build-system/scripts/build-ridos-welcome.sh
 # Runs on HOST  : uses chroot/ prefix
 # Output        : chroot/opt/ridos-core/bin/ridos-welcome
+#
+# CRITICAL: Uses a trap to GUARANTEE unmount even if build fails.
+# Without this, leftover bind mounts corrupt the squashfs → kernel panic.
 # ─────────────────────────────────────────────────────────────────────────────
 set -e
 
@@ -16,6 +19,19 @@ if [ ! -f "ridos-welcome/Cargo.toml" ] || \
     echo "ERROR: ridos-welcome source files not found."
     exit 1
 fi
+
+# ── TRAP: guarantee cleanup no matter what happens ───────────────────────────
+# This runs on EXIT (success, failure, or signal).
+# Leftover bind mounts corrupt the squashfs and cause kernel panic on boot.
+cleanup() {
+    echo "=== Cleaning up build-ridos-welcome mounts ==="
+    umount -l chroot/run  2>/dev/null || true
+    umount -l chroot/sys  2>/dev/null || true
+    umount -l chroot/proc 2>/dev/null || true
+    umount -l chroot/dev  2>/dev/null || true
+    echo "Mounts released."
+}
+trap cleanup EXIT
 
 echo "Copying source into chroot..."
 mkdir -p chroot/tmp/ridos-welcome/src
@@ -33,33 +49,27 @@ mount --bind /proc chroot/proc
 mount --bind /sys  chroot/sys
 mount --bind /run  chroot/run
 
-# ── Ensure sources.list has main contrib non-free ─────────────────────────────
-# The build step runs AFTER all packages are installed, and at that point
-# the sources.list may have been modified. We explicitly set it to ensure
-# all sections are available for apt to find libgtk-4-dev.
-echo "Setting up sources.list for build..."
+# ── Ensure correct sources.list ───────────────────────────────────────────────
 cat > chroot/etc/apt/sources.list << 'SOURCES'
 deb http://deb.debian.org/debian bookworm main contrib non-free non-free-firmware
 deb http://deb.debian.org/debian bookworm-updates main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security bookworm-security main contrib non-free non-free-firmware
 SOURCES
 
-# ── apt-get update (without -qq so failures are visible) ─────────────────────
+# ── Update + install build dependencies ──────────────────────────────────────
 echo "Running apt-get update..."
 chroot chroot apt-get update
 
-# ── Verify packages exist before trying to install ───────────────────────────
 echo "Verifying packages are available..."
 for pkg in build-essential libgtk-4-dev pkg-config ca-certificates curl; do
     if chroot chroot apt-cache show "$pkg" > /dev/null 2>&1; then
         echo "  FOUND: $pkg"
     else
-        echo "  MISSING: $pkg — aborting"
+        echo "  MISSING: $pkg"
         exit 1
     fi
 done
 
-# ── Install build dependencies ────────────────────────────────────────────────
 echo "Installing build dependencies..."
 chroot chroot apt-get install -y \
     build-essential \
@@ -101,32 +111,27 @@ export PKG_CONFIG_PATH=/usr/lib/x86_64-linux-gnu/pkgconfig:/usr/share/pkgconfig
 
 cd /tmp/ridos-welcome
 cargo build --release
-
 echo "Build done."
 ls -lh target/release/ridos-welcome
 BUILD
 
-# ── Copy binary ───────────────────────────────────────────────────────────────
+# ── Install binary ────────────────────────────────────────────────────────────
 echo "Installing binary..."
 mkdir -p chroot/opt/ridos-core/bin
 cp chroot/tmp/ridos-welcome/target/release/ridos-welcome \
    chroot/opt/ridos-core/bin/ridos-welcome
 chmod +x chroot/opt/ridos-core/bin/ridos-welcome
 
-# ── Clean up ──────────────────────────────────────────────────────────────────
+# ── Clean build artifacts BEFORE unmount ─────────────────────────────────────
 echo "Cleaning up build artifacts..."
 rm -rf chroot/tmp/ridos-welcome
 rm -rf chroot/root/.cargo
 rm -rf chroot/root/.rustup
 rm -f  chroot/tmp/rustup-init.sh
 
-# ── Unmount ───────────────────────────────────────────────────────────────────
-umount chroot/run  || true
-umount chroot/sys  || true
-umount chroot/proc || true
-umount chroot/dev  || true
+# trap runs here automatically — unmounts /dev /proc /sys /run
 
-# ── Verify ────────────────────────────────────────────────────────────────────
+# ── Verify binary ─────────────────────────────────────────────────────────────
 BINARY="chroot/opt/ridos-core/bin/ridos-welcome"
 if [ -f "$BINARY" ]; then
     SIZE=$(du -sh "$BINARY" | cut -f1)
@@ -134,7 +139,6 @@ if [ -f "$BINARY" ]; then
     echo "=== ridos-welcome built successfully ==="
     echo "    Binary : /opt/ridos-core/bin/ridos-welcome"
     echo "    Size   : $SIZE"
-    echo "    Type   : $(file "$BINARY" | cut -d: -f2)"
 else
     echo "ERROR: binary not found after build!"
     exit 1
