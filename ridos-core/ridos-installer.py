@@ -1095,25 +1095,58 @@ class Installer(Gtk.Window):
                     return fail(
                         f'squashfs only {sq_size} MB — build incomplete. '
                         'Rebuild the ISO and try again.')
+
+                # IMPORTANT: Do NOT extract to /tmp in the live session.
+                # /tmp is a RAM-based tmpfs — not enough space for 3-4GB.
+                # Extract directly into the mounted target partition.
+                # unsquashfs creates squashfs-root/ inside the destination,
+                # so files land at {mnt}/squashfs-root/boot etc.
+                # We then move everything up one level into {mnt}/ directly.
+
                 self._status(
                     f'Extracting squashfs ({sq_size} MB) — 10-20 min...',
                     0.15)
-                log('Running unsquashfs -f -d ...')
+                log(f'Extracting squashfs directly into {mnt} ...')
+                log(f'(this writes to the target disk partition)')
+
+                # Extract into target — creates {mnt}/squashfs-root/
                 rc = sh_log(
                     f'unsquashfs -f -d {mnt} {sq}',
                     self._log, timeout=3600)
+
                 if rc != 0:
                     log(f'unsquashfs returned {rc} — trying rsync fallback')
-                    sq = None   # fall through to rsync
+                    sq = None
                 else:
-                    log(f'unsquashfs complete.')
+                    # Check what was created
+                    ls_out, _, _ = sh(f'ls {mnt}/')
+                    log(f'After unsquashfs, {mnt}/ contains: {ls_out}')
+
+                    sq_root = f'{mnt}/squashfs-root'
+                    if os.path.isdir(sq_root):
+                        # Move all files from squashfs-root/ up to mnt/
+                        log(f'Moving files from squashfs-root/ to {mnt}/ ...')
+                        rc2 = sh_log(
+                            f'rsync -aAXH {sq_root}/ {mnt}/',
+                            self._log, timeout=3600)
+                        if rc2 not in (0, 23, 24):
+                            log(f'WARNING: rsync returned {rc2}')
+                        sh(f'rm -rf {sq_root}')
+                        log('squashfs-root/ merged into target.')
+                    else:
+                        log(f'No squashfs-root/ found — files extracted directly.')
+
+                    # Verify /boot has kernel
+                    boot_out, _, _ = sh(f'ls {mnt}/boot/ 2>/dev/null')
+                    log(f'{mnt}/boot/ contains: {boot_out}')
+                    log('Filesystem extraction complete.')
 
             if not sq:
                 self._status('Copying filesystem via rsync (10-20 min)...', 0.15)
-                log('Using rsync (squashfs not found or unsquashfs failed)')
-                log(f'Excluding: {mnt} (prevents infinite recursion)')
+                log('Using rsync from live system')
+                log(f'Excluding: {mnt}')
                 rc = sh_log(
-                    f'rsync -aAXH --info=progress2 '
+                    f'rsync -aAXH '
                     f'--exclude="{mnt}" '
                     f'--exclude="/dev/*" '
                     f'--exclude="/proc/*" '
