@@ -1278,6 +1278,35 @@ class Installer(Gtk.Window):
             #
             # CRITICAL: /proc /sys /dev MUST be mounted before this step.
             # They were mounted in step 7 above.
+            # ── Copy DNS + sources.list into chroot before apt runs ─────────
+            # Without this, apt-get install grub-pc fails with
+            # "Temporary failure resolving 'deb.debian.org'"
+            self._status('Configuring network for chroot...', 0.77)
+            log('Copying DNS config into chroot...')
+            try:
+                import shutil
+                shutil.copy('/etc/resolv.conf', f'{mnt}/etc/resolv.conf')
+                log('resolv.conf copied.')
+            except Exception as e:
+                log(f'WARNING: could not copy resolv.conf: {e}')
+
+            # Write correct sources.list into installed system
+            sources = (
+                'deb http://deb.debian.org/debian bookworm '
+                'main contrib non-free non-free-firmware\n'
+                'deb http://deb.debian.org/debian bookworm-updates '
+                'main contrib non-free non-free-firmware\n'
+                'deb http://security.debian.org/debian-security '
+                'bookworm-security main contrib non-free non-free-firmware\n'
+            )
+            open(f'{mnt}/etc/apt/sources.list', 'w').write(sources)
+            log('sources.list written.')
+
+            # Update package lists inside chroot
+            log('Running apt-get update inside chroot...')
+            sh_log(f'chroot {mnt} apt-get update -qq',
+                   self._log, timeout=120)
+
             self._status('Installing GRUB...', 0.78)
             grub_ok = False
 
