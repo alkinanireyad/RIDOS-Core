@@ -22,6 +22,24 @@ jobs:
     timeout-minutes: 240
 
     steps:
+      - name: Free disk space on runner
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          # Remove large unused packages to free ~10GB on GitHub Actions runner
+          sudo apt-get remove -y '^dotnet-.*' '^llvm-.*' '^mono-.*'             azure-cli google-cloud-sdk google-chrome-stable firefox             powershell microsoft-edge-stable 2>/dev/null || true
+          sudo apt-get autoremove -y 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          # Remove large directories not needed for our build
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/swift
+          echo "=== Disk space after cleanup ==="
+          df -h
+
       - name: Checkout source
         uses: actions/checkout@v4
 
@@ -466,10 +484,28 @@ jobs:
             echo "Clean: no active chroot mounts."
           fi
 
+      - name: Check disk space before squashfs build
+        run: |
+          echo "=== Disk space before mksquashfs ==="
+          df -h
+          FREE_GB=$(df / | awk 'NR==2 {printf "%.0f", $4/1024/1024}')
+          echo "Free space: ${FREE_GB}GB"
+          if [ "$FREE_GB" -lt 5 ]; then
+            echo "ERROR: Less than 5GB free — mksquashfs will likely fail"
+            exit 1
+          fi
+          echo "Disk space OK."
+
       - name: Build squashfs filesystem
         run: |
+          # NOTE: Do NOT use -e boot here.
+          # -e boot would exclude /boot from the squashfs,
+          # meaning the kernel would not be in the installed system.
+          # The kernel is copied separately to iso/live/vmlinuz for
+          # the live boot, but it must ALSO stay in the squashfs
+          # so the installed system has it in /boot after installation.
           sudo mksquashfs chroot filesystem.squashfs \
-            -comp zstd -Xcompression-level 15 -e boot -noappend
+            -comp zstd -Xcompression-level 15 -noappend
           echo "squashfs size: $(du -sh filesystem.squashfs | cut -f1)"
           # Verify squashfs is large enough to be valid
           SIZE_MB=$(du -m filesystem.squashfs | cut -f1)
