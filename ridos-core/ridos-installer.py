@@ -1074,10 +1074,11 @@ class Installer(Gtk.Window):
 
             # ── 6. rsync ──────────────────────────────────────────────────
             self._status('Locating squashfs filesystem...', 0.15)
-            # Prefer unsquashfs over rsync:
-            # - unsquashfs copies the exact installed filesystem
-            # - rsync from live system can miss files or finish too fast
-            #   because the live system runs from RAM overlay
+
+            # Search for squashfs using multiple methods
+            log('Searching for filesystem.squashfs...')
+
+            # Method 1: known static paths
             squashfs_paths = [
                 '/run/live/medium/live/filesystem.squashfs',
                 '/run/live/rootfs/filesystem.squashfs',
@@ -1085,82 +1086,112 @@ class Installer(Gtk.Window):
                 '/cdrom/live/filesystem.squashfs',
                 '/run/initramfs/live/filesystem.squashfs',
             ]
+
+            # Method 2: scan mount output for ISO mount points
+            mount_out, _, _ = sh('mount 2>/dev/null')
+            for line in mount_out.splitlines():
+                if 'iso9660' in line or 'squashfs' in line:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        mp = parts[2]
+                        for name in ['live/filesystem.squashfs',
+                                     'filesystem.squashfs']:
+                            c = f'{mp}/{name}'
+                            if c not in squashfs_paths:
+                                squashfs_paths.append(c)
+
+            # Method 3: find command
+            find_out, _, _ = sh(
+                'find /run /cdrom /media /lib/live -name '
+                '"filesystem.squashfs" -maxdepth 6 2>/dev/null | head -3')
+            for p in find_out.splitlines():
+                p = p.strip()
+                if p and p not in squashfs_paths:
+                    squashfs_paths.append(p)
+
             sq = next(
                 (p for p in squashfs_paths if os.path.exists(p)), None)
 
-            if sq:
-                sq_size = os.path.getsize(sq) // (1024*1024)
-                log(f'Found squashfs: {sq}  ({sq_size} MB)')
-                if sq_size < 200:
-                    return fail(
-                        f'squashfs only {sq_size} MB — build incomplete. '
-                        'Rebuild the ISO and try again.')
+            log(f'Squashfs found: {sq}')
+            if not sq:
+                log('Not found at:')
+                for p in squashfs_paths:
+                    log(f'  {p}')
 
-                # IMPORTANT: Do NOT extract to /tmp in the live session.
-                # /tmp is a RAM-based tmpfs — not enough space for 3-4GB.
-                # Extract directly into the mounted target partition.
-                # unsquashfs creates squashfs-root/ inside the destination,
-                # so files land at {mnt}/squashfs-root/boot etc.
-                # We then move everything up one level into {mnt}/ directly.
+            if sq:
+                sq_size = os.path.getsize(sq) // (1024 * 1024)
+                log(f'Size: {sq_size} MB')
+
+                tmp_extract = '/tmp/sq_extract'
+                sh(f'rm -rf {tmp_extract}')
+                sh(f'mkdir -p {tmp_extract}')
 
                 self._status(
-                    f'Extracting squashfs ({sq_size} MB) — 10-20 min...',
-                    0.15)
-                log(f'Extracting squashfs directly into {mnt} ...')
-                log(f'(this writes to the target disk partition)')
-
-                # Extract into target — creates {mnt}/squashfs-root/
+                    f'Extracting squashfs ({sq_size} MB)...', 0.16)
+                log(f'unsquashfs -f -d {tmp_extract} {sq}')
                 rc = sh_log(
-                    f'unsquashfs -f -d {mnt} {sq}',
+                    f'unsquashfs -f -d {tmp_extract} {sq}',
                     self._log, timeout=3600)
 
                 if rc != 0:
-                    log(f'unsquashfs returned {rc} — trying rsync fallback')
+                    log(f'unsquashfs returned {rc} — trying rsync')
+                    sh(f'rm -rf {tmp_extract}')
                     sq = None
                 else:
-                    # Check what was created
-                    ls_out, _, _ = sh(f'ls {mnt}/')
-                    log(f'After unsquashfs, {mnt}/ contains: {ls_out}')
-
-                    sq_root = f'{mnt}/squashfs-root'
-                    if os.path.isdir(sq_root):
-                        # Move all files from squashfs-root/ up to mnt/
-                        log(f'Moving files from squashfs-root/ to {mnt}/ ...')
-                        rc2 = sh_log(
-                            f'rsync -aAXH {sq_root}/ {mnt}/',
-                            self._log, timeout=3600)
-                        if rc2 not in (0, 23, 24):
-                            log(f'WARNING: rsync returned {rc2}')
-                        sh(f'rm -rf {sq_root}')
-                        log('squashfs-root/ merged into target.')
-                    else:
-                        log(f'No squashfs-root/ found — files extracted directly.')
-
-                    # Verify /boot has kernel
-                    boot_out, _, _ = sh(f'ls {mnt}/boot/ 2>/dev/null')
-                    log(f'{mnt}/boot/ contains: {boot_out}')
-                    log('Filesystem extraction complete.')
+                    ls_out, _, _ = sh(f'ls {tmp_extract}/')
+                    log(f'Contents: {ls_out}')
+                    sq_root = f'{tmp_extract}/squashfs-root'
+                    src = sq_root if os.path.isdir(sq_root) else tmp_extract
+                    log(f'rsync {src}/ → {mnt}/')
+                    self._status('Copying to disk...', 0.40)
+                    rc2 = sh_log(
+                        f'rsync -aAXH {src}/ {mnt}/',
+                        self._log, timeout=3600)
+                    if rc2 not in (0, 23, 24):
+                        log(f'WARNING: rsync returned {rc2}')
+                    sh(f'rm -rf {tmp_extract}')
+                    log('Copy complete.')
 
             if not sq:
-                self._status('Copying filesystem via rsync (10-20 min)...', 0.15)
-                log('Using rsync from live system')
-                log(f'Excluding: {mnt}')
-                rc = sh_log(
-                    f'rsync -aAXH '
-                    f'--exclude="{mnt}" '
-                    f'--exclude="/dev/*" '
-                    f'--exclude="/proc/*" '
-                    f'--exclude="/sys/*" '
-                    f'--exclude="/run/*" '
-                    f'--exclude="/tmp/*" '
-                    f'--exclude="/media/*" '
-                    f'--exclude="/lost+found" '
-                    f'--exclude="/opt/ridos-core/logs/*" '
-                    f'/ {mnt}/',
-                    self._log, timeout=3600)
-                if rc not in (0, 23, 24):
-                    log(f'WARNING: rsync returned {rc}')
-                log('rsync complete.')
+                # Try copying from squashfs mount point (already unpacked)
+                sq_mount = ''
+                for candidate in [
+                    '/run/live/rootfs/filesystem',
+                    '/run/live/rootfs/filesystem.squashfs',
+                    '/lib/live/mount/rootfs/filesystem.squashfs',
+                ]:
+                    if os.path.isdir(candidate) and                        os.path.exists(f'{candidate}/usr'):
+                        sq_mount = candidate
+                        log(f'Found mounted squashfs at: {sq_mount}')
+                        break
+
+                if sq_mount:
+                    log(f'rsync from mount: {sq_mount}/ → {mnt}/')
+                    self._status('Copying from squashfs mount...', 0.15)
+                    rc = sh_log(
+                        f'rsync -aAXH {sq_mount}/ {mnt}/',
+                        self._log, timeout=3600)
+                    if rc not in (0, 23, 24):
+                        log(f'WARNING: rsync returned {rc}')
+                    log('Copy from mount complete.')
+                else:
+                    log('Last resort: rsync from live root /')
+                    self._status('rsync from live root (slow)...', 0.15)
+                    rc = sh_log(
+                        f'rsync -aAXH '
+                        f'--exclude="{mnt}" '
+                        f'--exclude="/dev/*" '
+                        f'--exclude="/proc/*" '
+                        f'--exclude="/sys/*" '
+                        f'--exclude="/run/*" '
+                        f'--exclude="/tmp/*" '
+                        f'--exclude="/media/*" '
+                        f'--exclude="/lost+found" '
+                        f'/ {mnt}/',
+                        self._log, timeout=3600)
+                    if rc not in (0, 23, 24):
+                        log(f'WARNING: rsync returned {rc}')
+                    log('rsync complete.')
 
             # Validate that critical files were copied
             self._status('Validating copied filesystem...', 0.63)
