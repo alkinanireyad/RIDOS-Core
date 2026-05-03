@@ -22,6 +22,24 @@ jobs:
     timeout-minutes: 240
 
     steps:
+      - name: Free disk space on runner
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          # Remove large unused packages to free ~10GB on GitHub Actions runner
+          sudo apt-get remove -y '^dotnet-.*' '^llvm-.*' '^mono-.*'             azure-cli google-cloud-sdk google-chrome-stable firefox             powershell microsoft-edge-stable 2>/dev/null || true
+          sudo apt-get autoremove -y 2>/dev/null || true
+          sudo apt-get clean 2>/dev/null || true
+          # Remove large directories not needed for our build
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/share/swift
+          echo "=== Disk space after cleanup ==="
+          df -h
+
       - name: Checkout source
         uses: actions/checkout@v4
 
@@ -371,10 +389,65 @@ jobs:
           chmod +x build-system/scripts/install-ridos-files.sh
           sudo bash build-system/scripts/install-ridos-files.sh
 
-      # ── Compile Rust/GTK4 welcome app ─────────────────────────────────────
-      # Skips gracefully if source files are not in the repo.
-      # Adds ~20 min to build time. Binary ends up at:
-      # /opt/ridos-core/bin/ridos-welcome
+      # ── Verify critical files are in chroot before building squashfs ──────
+      - name: Verify chroot integrity
+        run: |
+          echo "=== Verifying critical files in chroot ==="
+          FAIL=0
+
+          # 1. Installer must be present (only hard failure)
+          if [ -f "chroot/opt/ridos-core/bin/ridos-installer.py" ]; then
+            echo "  OK : ridos-installer.py"
+          else
+            echo "  MISSING: ridos-installer.py"
+            FAIL=1
+          fi
+
+          # 2. Kernel must be present (only hard failure)
+          KERN=$(ls chroot/boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)
+          if [ -n "$KERN" ]; then
+            echo "  OK : kernel: $KERN"
+          else
+            echo "  MISSING: no kernel in chroot/boot/"
+            FAIL=1
+          fi
+
+          # 3. Check files directly on disk — no chroot execution needed
+          # unsquashfs
+          if [ -f "chroot/usr/bin/unsquashfs" ] || \
+             [ -f "chroot/usr/sbin/unsquashfs" ]; then
+            echo "  OK : unsquashfs"
+          else
+            echo "  WARNING: unsquashfs not found — will install at runtime"
+          fi
+
+          # grub-install
+          if [ -f "chroot/usr/sbin/grub-install" ] || \
+             [ -f "chroot/usr/bin/grub-install" ]; then
+            echo "  OK : grub-install"
+          else
+            echo "  WARNING: grub-install not found in chroot/usr/sbin/"
+            echo "           Checking grub packages..."
+            ls chroot/usr/sbin/grub* 2>/dev/null || echo "  No grub binaries found"
+          fi
+
+          # python3-gi
+          if [ -d "chroot/usr/lib/python3" ] && \
+             find chroot/usr/lib/python3 -name "gi" -type d 2>/dev/null | \
+             grep -q gi; then
+            echo "  OK : python3-gi"
+          else
+            echo "  WARNING: python3-gi not confirmed (non-critical)"
+          fi
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo ""
+            echo "ERROR: Critical files missing. Aborting."
+            exit 1
+          fi
+          echo ""
+          echo "Chroot integrity check passed."
+
       - name: Build ridos-welcome (Rust + GTK4)
         run: |
           if [ -f "build-system/scripts/build-ridos-welcome.sh" ] && \
@@ -408,19 +481,55 @@ jobs:
             echo "Clean: no active chroot mounts."
           fi
 
+      - name: Check disk space before squashfs build
+        run: |
+          echo "=== Disk space before mksquashfs ==="
+          df -h
+          FREE_GB=$(df / | awk 'NR==2 {printf "%.0f", $4/1024/1024}')
+          echo "Free space: ${FREE_GB}GB"
+          if [ "$FREE_GB" -lt 5 ]; then
+            echo "ERROR: Less than 5GB free — mksquashfs will likely fail"
+            exit 1
+          fi
+          echo "Disk space OK."
+
       - name: Build squashfs filesystem
         run: |
+          # NOTE: Do NOT use -e boot here.
+          # -e boot would exclude /boot from the squashfs,
+          # meaning the kernel would not be in the installed system.
+          # The kernel is copied separately to iso/live/vmlinuz for
+          # the live boot, but it must ALSO stay in the squashfs
+          # so the installed system has it in /boot after installation.
           sudo mksquashfs chroot filesystem.squashfs \
-            -comp zstd -Xcompression-level 15 -e boot -noappend
+            -comp zstd -Xcompression-level 15 -noappend
           echo "squashfs size: $(du -sh filesystem.squashfs | cut -f1)"
           # Verify squashfs is large enough to be valid
           SIZE_MB=$(du -m filesystem.squashfs | cut -f1)
           echo "squashfs size in MB: $SIZE_MB"
-          if [ "$SIZE_MB" -lt 500 ]; then
-            echo "ERROR: squashfs is too small ($SIZE_MB MB) - build likely failed"
+          if [ "$SIZE_MB" -lt 1000 ]; then
+            echo "ERROR: squashfs is too small ($SIZE_MB MB) - expected 2000+ MB"
             exit 1
           fi
           echo "squashfs size OK."
+
+          # Verify squashfs contains /boot/vmlinuz — catches -e boot bug
+          echo "=== Verifying squashfs contains kernel ==="
+          KERN_IN_SQ=$(unsquashfs -l filesystem.squashfs 2>/dev/null | \
+            grep "vmlinuz-" | head -3)
+          if [ -n "$KERN_IN_SQ" ]; then
+            echo "  OK: kernel in squashfs: $KERN_IN_SQ"
+          else
+            echo "  ERROR: no vmlinuz found inside squashfs!"
+            echo "  squashfs boot contents:"
+            unsquashfs -l filesystem.squashfs 2>/dev/null | \
+              grep "boot" | head -20 || echo "  (empty)"
+            echo ""
+            echo "  DIAGNOSIS: The squashfs does not contain /boot/vmlinuz."
+            echo "  This causes 'No kernel found' error during installation."
+            echo "  Check the mksquashfs command — it must NOT use -e boot."
+            exit 1
+          fi
 
       - name: Prepare ISO structure
         run: |
