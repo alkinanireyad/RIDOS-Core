@@ -1422,9 +1422,20 @@ class Installer(Gtk.Window):
                 log('Contents of /boot:')
                 ls_out, _, _ = sh(f'ls -la {mnt}/boot/ 2>/dev/null')
                 log(ls_out)
+                log('Contents of /mnt/ridos_target root:')
+                root_out, _, _ = sh(f'ls {mnt}/ 2>/dev/null')
+                log(root_out)
+                log('Searching for vmlinuz anywhere on target:')
+                find_out, _, _ = sh(
+                    f'find {mnt} -name "vmlinuz*" 2>/dev/null | head -5')
+                log(find_out if find_out else 'None found')
+                log('Squashfs search paths that were tried:')
+                for p in squashfs_paths:
+                    exists = os.path.exists(p)
+                    log(f'  {p}: {"EXISTS" if exists else "not found"}')
                 return fail(
-                    'No kernel found in /boot after filesystem copy. '
-                    'The squashfs may be incomplete. Rebuild the ISO.')
+                    'No kernel found in /boot after filesystem copy.\n'
+                    'Check log above for squashfs search results.')
 
             kern_base = os.path.basename(out_kern.strip())
             init_base = (os.path.basename(out_init.strip())
