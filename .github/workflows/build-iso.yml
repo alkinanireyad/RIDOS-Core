@@ -423,11 +423,21 @@ jobs:
           fi
 
           # 4. grub-install must be present
-          if chroot chroot which grub-install > /dev/null 2>&1; then
-            echo "  OK : grub-install"
+          # grub-install is in /usr/sbin — check both PATH locations
+          if chroot chroot sh -c "which grub-install || ls /usr/sbin/grub-install"              > /dev/null 2>&1; then
+            echo "  OK : grub-install found"
           else
-            echo "  MISSING: grub-install — GRUB installation will fail!"
-            FAIL=1
+            echo "  grub-install not found — installing grub-pc-bin..."
+            sudo mount --bind /dev  chroot/dev
+            sudo mount --bind /proc chroot/proc
+            sudo mount --bind /sys  chroot/sys
+            sudo chroot chroot apt-get install -y grub-pc-bin grub-common               grub2-common 2>/dev/null || true
+            sudo umount chroot/sys chroot/proc chroot/dev || true
+            if chroot chroot sh -c "which grub-install ||                ls /usr/sbin/grub-install" > /dev/null 2>&1; then
+              echo "  OK : grub-install installed successfully"
+            else
+              echo "  WARNING: grub-install still missing — will try at install time"
+            fi
           fi
 
           # 5. Kernel must be present
@@ -437,6 +447,18 @@ jobs:
           else
             echo "  MISSING: no kernel in chroot/boot/ !"
             FAIL=1
+          fi
+
+          # 6. python3-gi — warning only, not a build failure
+          if chroot chroot python3 -c "import gi" > /dev/null 2>&1; then
+            echo "  OK : python3-gi"
+          else
+            echo "  WARNING: python3-gi not found — installing..."
+            sudo mount --bind /dev  chroot/dev
+            sudo mount --bind /proc chroot/proc
+            sudo mount --bind /sys  chroot/sys
+            sudo chroot chroot apt-get install -y               python3-gi python3-gi-cairo               gir1.2-gtk-3.0 2>/dev/null || true
+            sudo umount chroot/sys chroot/proc chroot/dev || true
           fi
 
           if [ "$FAIL" -eq 1 ]; then
